@@ -1,0 +1,274 @@
+# Market Regime Trading System - Walkthrough
+
+Kompletný systém obchodných stratégií založených na tržných režimoch s frontend vizualizáciou.
+
+## Čo bolo vytvorené
+
+### Backend - Trading Strategies
+
+````carousel
+#### Mean Reversion Strategy
+**Pre CHOPPY režim**
+
+```python
+# src/strategies/mean_reversion.py
+class MeanReversionStrategy(BaseStrategy):
+    - Vstup pri odchýlke od VWAP (>1.5%)
+    - RSI potvrdenie (oversold/overbought)
+    - Cieľ: návrat k VWAP
+    - Trailing SL 0.5%
+```
+
+Logika:
+- Čaká na extrémnu odchýlku od VWAP
+- Sleduje objem (preferuje declining volume = exhaustion)
+- Confidence scoring na základe RSI a vzdialenosti
+
+<!-- slide -->
+#### Pullback Strategy
+**Pre TRENDING režim**
+
+```python
+# src/strategies/pullback.py
+class PullbackStrategy(BaseStrategy):
+    - Čaká na pullback k EMA/VWAP v trende
+    - Vstup pri bounce candle
+    - Risk:Reward 2.5:1
+    - Trailing SL 0.8%
+```
+
+Logika:
+- Identifikuje trend cez EMA crossover
+- Čaká na pullback do zóny podpory
+- Potvrdenie: bullish/bearish rejection candle
+
+<!-- slide -->
+#### Momentum Strategy
+**Pre TRENDING režim**
+
+```python
+# src/strategies/momentum.py  
+class MomentumStrategy(BaseStrategy):
+    - Breakout z konsolidácie
+    - Volume surge potvrdenie (1.5x avg)
+    - Tight stop, high R:R (3:1)
+    - Aggressive trailing 0.6%
+```
+
+Logika:
+- Detekuje tight consolidation (range < 2x ATR)
+- Vstup na breakout s volume surge
+- Pyramiding up to 2 positions
+
+<!-- slide -->
+#### Rotation Strategy
+**Pre MIXED režim**
+
+```python
+# src/strategies/rotation.py
+class RotationStrategy(BaseStrategy):
+    - Sleduje relative performance
+    - Rotácia pri VWAP zone
+    - Conservative stops (2.5x ATR)
+    - Trailing SL 1.0%
+```
+
+Logika:
+- Analyzuje momentum za 20 barov
+- Vstup keď price at VWAP s trend changing
+- Wider stops pre choppy conditions
+
+<!-- slide -->
+#### VWAP Magnet Strategy
+**Pre VŠETKY režimy**
+
+```python
+# src/strategies/vwap_magnet.py
+class VWAPMagnetStrategy(BaseStrategy):
+    - VWAP ako cenový magnet
+    - Distance + time scoring
+    - Volume profile analysis
+    - Tight trailing 0.4%
+```
+
+Logika:
+- "Magnet pull" scoring based on:
+  - Distance from VWAP (0.8% - 3%)
+  - Bars since last VWAP touch
+  - Volume exhaustion
+- Target: exact VWAP return
+````
+
+---
+
+### Trailing Stop-Loss Module
+
+[trailing_stop.py](file:///Users/hotovo/.gemini/antigravity/scratch/market_regime_detection/src/strategies/trailing_stop.py)
+
+| Type | Popis |
+|------|-------|
+| **FIXED** | Pevný stop, nikdy sa nehýbe |
+| **PERCENT** | Trailing X% od highest/lowest |
+| **ATR** | Trailing N × ATR od ceny |
+| **CHANDELIER** | Highest high - N × ATR |
+| **BREAKEVEN** | Posun na entry po X% zisku |
+| **PARABOLIC** | Accelerating stop (SAR-like) |
+
+---
+
+### Architecture
+
+```mermaid
+graph TB
+    subgraph Backtest API
+        BA[localhost:8000]
+        BA -->|/api/current| Price
+        BA -->|/api/history| OHLCV
+        BA -->|/api/indicator| Indicators
+    end
+    
+    subgraph Strategy API
+        SA[localhost:8001]
+        SE[Strategy Engine]
+        
+        SE --> MR[Mean Reversion]
+        SE --> PB[Pullback]
+        SE --> MO[Momentum]
+        SE --> RO[Rotation]
+        SE --> VM[VWAP Magnet]
+        
+        TSM[Trailing Stop Manager]
+    end
+    
+    subgraph Frontend
+        FE[React Dashboard]
+        RC[Regime Indicator]
+        SC[Strategy Cards]
+        ST[Signals Table]
+        TH[Trades History]
+        PS[Performance Stats]
+    end
+    
+    BA --> SE
+    SA --> FE
+    SE --> TSM
+```
+
+---
+
+## Spustenie
+
+### 1. Backtest API (port 8000)
+Najprv musí byť spustené backtest API ktoré poskytuje dáta:
+
+```bash
+# V inom termináli/projekte
+python backtest_server.py  # na localhost:8000
+```
+
+### 2. Strategy API (port 8001)
+
+```bash
+cd /Users/hotovo/.gemini/antigravity/scratch/market_regime_detection
+python api_server.py
+```
+
+Output:
+```
+============================================================
+TRADING STRATEGY API SERVER
+============================================================
+
+Make sure the backtest API is running on localhost:8000
+
+Endpoints:
+  GET  /api/state       - Current state
+  GET  /api/regime      - Current regime
+  GET  /api/strategies  - All strategies
+  POST /api/step        - Advance one bar
+  ...
+============================================================
+```
+
+### 3. Frontend Dashboard (port 5173)
+
+```bash
+cd frontend
+npm run dev
+```
+
+Otvor: http://localhost:5173
+
+---
+
+## API Endpoints
+
+| Endpoint | Method | Popis |
+|----------|--------|-------|
+| `/api/state` | GET | Kompletný stav enginu |
+| `/api/regime` | GET | Aktuálny tržný režim |
+| `/api/strategies` | GET | Všetky stratégie a ich konfig |
+| `/api/signals` | GET | História signálov |
+| `/api/trades` | GET | História obchodov |
+| `/api/positions` | GET | Otvorené pozície |
+| `/api/performance` | GET | Performance metriky |
+| `/api/step` | POST | Posun o 1 bar |
+| `/api/run?bars=10` | POST | Posun o N barov |
+| `/api/reset` | POST | Reset enginu |
+| `/ws` | WebSocket | Real-time updates |
+
+---
+
+## Frontend Features
+
+- **Regime Indicator** - Zobrazuje aktuálny tržný režim (TRENDING/CHOPPY/MIXED)
+- **Strategy Cards** - Interaktívne karty pre každú stratégiu s posledným signálom
+- **Controls** - Step, Run 10/50 bars, Reset
+- **Open Positions** - Zoznam otvorených pozícií s SL/TP a trailing status
+- **Performance Stats** - Win rate, total PnL, best/worst trade, breakdown by strategy
+- **Signals Table** - História signálov s confidence, SL, TP, reasoning
+- **Trades History** - Kompletná história obchodov s PnL a exit reason
+
+---
+
+## Súhrn súborov
+
+```
+market_regime_detection/
+├── api_server.py                    # FastAPI server (port 8001)
+├── src/
+│   ├── strategy_engine.py           # Hlavný engine
+│   └── strategies/
+│       ├── __init__.py
+│       ├── base_strategy.py         # Base class + Signal + Position
+│       ├── trailing_stop.py         # 6 typov trailing SL
+│       ├── mean_reversion.py        # CHOPPY strategy
+│       ├── pullback.py              # TRENDING strategy
+│       ├── momentum.py              # TRENDING strategy
+│       ├── rotation.py              # MIXED strategy
+│       └── vwap_magnet.py           # Universal strategy
+└── frontend/
+    ├── src/
+    │   ├── App.jsx
+    │   ├── index.css                # Design system
+    │   ├── hooks/useBackendApi.js   # API hook
+    │   └── components/
+    │       ├── Dashboard.jsx
+    │       ├── RegimeIndicator.jsx
+    │       ├── StrategyCard.jsx
+    │       ├── SignalsTable.jsx
+    │       ├── TradesHistory.jsx
+    │       ├── PositionsList.jsx
+    │       └── PerformanceStats.jsx
+    └── package.json
+```
+
+---
+
+## Validation
+
+✅ Všetky stratégie úspešne importované  
+✅ Strategy engine funkčný  
+✅ API server pripravený na port 8001  
+✅ Frontend pripravený na port 5173  
+✅ Trailing stop module s 6 typmi  
