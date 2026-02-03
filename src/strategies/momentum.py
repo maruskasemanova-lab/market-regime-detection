@@ -23,13 +23,13 @@ class MomentumStrategy(BaseStrategy):
     
     def __init__(
         self,
-        consolidation_bars: int = 5,          # Bars to check for consolidation
-        breakout_atr_mult: float = 0.5,       # Breakout threshold as ATR multiple
-        volume_threshold: float = 1.5,        # Volume must be X times average
-        atr_stop_mult: float = 1.5,           # Tight stop
-        rr_ratio: float = 3.0,                # High R:R
-        min_confidence: float = 70.0,         # High bar for entry
-        trailing_stop_pct: float = 0.6        # Aggressive trailing
+        consolidation_bars: int = 10,         # 10 minute consolidation (standard flag)
+        breakout_atr_mult: float = 0.3,       # Earlier entry (was 0.5)
+        volume_threshold: float = 1.5,        # 1.5x Volume surge needed (was 1.2)
+        atr_stop_mult: float = 2.0,           # Tighter risk (was 3.0)
+        rr_ratio: float = 2.5,                # Good R:R
+        min_confidence: float = 70.0,         # High bar
+        trailing_stop_pct: float = 1.5        # Widen trail to catch runners (was 0.8)
     ):
         super().__init__(
             name="Momentum",
@@ -70,6 +70,7 @@ class MomentumStrategy(BaseStrategy):
         rsi = indicators.get('rsi')
         vwap = indicators.get('vwap')
         ema = indicators.get('ema') or indicators.get('ema_fast')
+        adx = indicators.get('adx')
         
         if atr is None:
             return None
@@ -78,6 +79,7 @@ class MomentumStrategy(BaseStrategy):
         rsi_val = rsi[-1] if isinstance(rsi, list) else (rsi or 50)
         vwap_val = vwap[-1] if isinstance(vwap, list) else (vwap or current_price)
         ema_val = ema[-1] if isinstance(ema, list) else (ema or current_price)
+        adx_val = adx[-1] if isinstance(adx, list) else (adx or 0)
         
         # Get OHLC
         opens = ohlcv.get('open', [])
@@ -97,12 +99,16 @@ class MomentumStrategy(BaseStrategy):
         consol_range = consol_high - consol_low
         
         # Check if range is "tight" (consolidation)
-        is_consolidation = consol_range < atr_val * 2  # Range less than 2x ATR
+        is_consolidation = consol_range < atr_val * 2.0  # Stricter: Range less than 2.0x ATR (was 3.0)
         
         # Volume analysis
         avg_volume = sum(volumes[-20:-1]) / min(19, len(volumes) - 1) if len(volumes) > 1 else 0
         current_volume = volumes[-1] if volumes else 0
         volume_surge = current_volume >= avg_volume * self.volume_threshold
+        
+        # Filter: Strong Momentum using ADX
+        if adx_val < 35:  # Raised to 35 to filter out "fake trends" (TSLA/AMD)
+            return None
         
         signal = None
         confidence = 50.0
@@ -110,6 +116,15 @@ class MomentumStrategy(BaseStrategy):
         
         # LONG BREAKOUT
         if current_price > consol_high + (atr_val * self.breakout_atr_mult):
+            # Trend Filter: Price must be aligned with SMA (Trend)
+            sma_val = indicators.get('sma')[-1] if indicators.get('sma') else None
+            if sma_val and current_price < sma_val:
+                return None
+                
+            # RSI Filter: Don't buy overbought
+            if rsi_val > 70:
+                return None
+            
             reasoning_parts.append(f"Breakout above {consol_high:.2f}")
             confidence += 15
             
@@ -162,12 +177,22 @@ class MomentumStrategy(BaseStrategy):
                         'atr': atr_val,
                         'volume_ratio': current_volume / avg_volume if avg_volume else 0,
                         'rsi': rsi_val,
-                        'regime': regime.value
+                        'regime': regime.value,
+                        'adx': adx_val
                     }
                 )
         
         # SHORT BREAKDOWN
         elif current_price < consol_low - (atr_val * self.breakout_atr_mult):
+            # Trend Filter: Price must be aligned with SMA (Trend)
+            sma_val = indicators.get('sma')[-1] if indicators.get('sma') else None
+            if sma_val and current_price > sma_val:
+                return None
+
+            # RSI Filter: Don't sell oversold
+            if rsi_val < 30:
+                return None
+
             reasoning_parts.append(f"Breakdown below {consol_low:.2f}")
             confidence += 15
             
@@ -219,7 +244,8 @@ class MomentumStrategy(BaseStrategy):
                         'atr': atr_val,
                         'volume_ratio': current_volume / avg_volume if avg_volume else 0,
                         'rsi': rsi_val,
-                        'regime': regime.value
+                        'regime': regime.value,
+                        'adx': adx_val
                     }
                 )
         

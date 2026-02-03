@@ -1,0 +1,9 @@
+INFO:     Will watch for changes in these directories: ['/Users/hotovo/.gemini/antigravity/scratch/market_regime_detection']
+INFO:     Uvicorn running on http://127.0.0.1:8002 (Press CTRL+C to quit)
+INFO:     Started reloader process [78474] using WatchFiles
+INFO:     Started server process [78633]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:59869 - "POST /api/run/start HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:59881 - "POST /api/run/start HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:59889 - "GET /api/available-data HTTP/1.1" 404 Not Found

@@ -27,11 +27,11 @@ class VWAPMagnetStrategy(BaseStrategy):
     
     def __init__(
         self,
-        min_distance_pct: float = 0.8,         # Min distance to trigger
-        max_distance_pct: float = 3.0,         # Max distance (beyond = too stretched)
-        bars_since_vwap_threshold: int = 10,   # Bars since VWAP touch
+        min_distance_pct: float = 0.4,         # Lowered to 0.4 for active scalping (was 0.8)
+        max_distance_pct: float = 3.0,         # Max distance
+        bars_since_vwap_threshold: int = 5,    # Faster trigger (was 10)
         volume_confirm: bool = True,           # Require volume confirmation
-        atr_stop_mult: float = 1.8,            # Stop multiplier
+        atr_stop_mult: float = 2.0,            # Standard stop (was 1.8)
         min_confidence: float = 60.0,          # Min confidence
         trailing_stop_pct: float = 0.4         # Tight trail to VWAP
     ):

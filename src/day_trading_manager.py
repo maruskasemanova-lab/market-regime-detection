@@ -4,9 +4,13 @@ Manages trading sessions for individual days with regime detection and strategy 
 """
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional
 from enum import Enum
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .strategies.base_strategy import BaseStrategy, Signal, SignalType, Position, Regime
 from .strategies.trailing_stop import TrailingStopManager, TrailingStopConfig, StopType
@@ -64,8 +68,9 @@ class DayTrade:
     pnl_dollars: float
     exit_reason: str
     # Trading costs breakdown
-    spread_cost: float = 0.0
+    slippage: float = 0.0
     commission: float = 0.0
+    reg_fee: float = 0.0
     sec_fee: float = 0.0
     finra_fee: float = 0.0
     total_costs: float = 0.0
@@ -85,8 +90,9 @@ class DayTrade:
             'pnl_dollars': round(self.pnl_dollars, 2),
             'exit_reason': self.exit_reason,
             'costs': {
-                'spread': round(self.spread_cost, 4),
+                'slippage': round(self.slippage, 4),
                 'commission': round(self.commission, 4),
+                'reg_fee': round(self.reg_fee, 4),
                 'sec_fee': round(self.sec_fee, 6),
                 'finra_fee': round(self.finra_fee, 6),
                 'total': round(self.total_costs, 4)
@@ -97,12 +103,24 @@ class DayTrade:
 
 @dataclass
 class TradingCosts:
-    """Trading costs configuration."""
-    spread_pct: float = 0.02  # 0.02% spread (half on entry, half on exit)
-    commission_per_trade: float = 1.0  # $1 per trade (each side)
-    sec_fee_per_dollar: float = 0.0000278  # SEC fee on sale proceeds
-    finra_fee_per_share: float = 0.000145  # FINRA TAF per share (capped at $7.27)
-    
+    """Trading costs (IBKR Tiered, liquid US large-caps, Feb 2026).
+    Model:
+      - Commission: $0.0035/share with $0.35 minimum per order (per side).
+      - Slippage: $0.01 per share round-trip (0.5¢ per side through the spread).
+      - FINRA TAF: SELL side only, min $0.01, cap $9.79.
+      - SEC fee: optional SELL-side notional fee (default 0).
+      - reg_fee: optional pass-through per share (default 0).
+    """
+    commission_per_share: float = 0.0035
+    commission_min: float = 0.35      # per order (per side)
+    # 0.5¢ per side so round‑trip slippage totals 1¢ per share.
+    slippage_per_share: float = 0.005
+    finra_fee_per_share: float = 0.000195
+    finra_fee_cap: float = 9.79
+    finra_fee_min: float = 0.01
+    sec_fee_per_dollar: float = 0.0   # SELL-side notional, default 0
+    reg_fee_per_share: float = 0.0    # optional pass-through, SELL side only
+
     def calculate_costs(
         self,
         entry_price: float,
@@ -112,36 +130,36 @@ class TradingCosts:
     ) -> Dict[str, float]:
         """
         Calculate all trading costs.
-        Returns dict with spread_cost, commission, sec_fee, finra_fee, total.
+        Returns dict with commission, reg_fee, slippage, finra_fee, total.
         """
-        # Spread cost: half at entry, half at exit
-        half_spread = self.spread_pct / 2 / 100
-        if side == 'long':
-            # Buy higher, sell lower
-            entry_spread = entry_price * half_spread
-            exit_spread = exit_price * half_spread
-        else:
-            # Sell higher, buy lower (short)
-            entry_spread = exit_price * half_spread
-            exit_spread = entry_price * half_spread
-        
-        spread_cost = (entry_spread + exit_spread) * shares
-        
-        # Commission: $1 per trade (entry + exit = $2 total)
-        commission = self.commission_per_trade * 2
-        
-        # SEC fee: only on sale proceeds
-        sale_proceeds = exit_price * shares if side == 'long' else entry_price * shares
-        sec_fee = sale_proceeds * self.sec_fee_per_dollar
-        
-        # FINRA TAF: per share, capped at $7.27
-        finra_fee = min(shares * self.finra_fee_per_share, 7.27)
-        
-        total = spread_cost + commission + sec_fee + finra_fee
+        # Slippage: $0.01 per share on both entry and exit
+        slippage_cost = self.slippage_per_share * shares * 2
+
+        # Commission per side with minimum
+        entry_commission = max(self.commission_per_share * shares, self.commission_min)
+        exit_commission = max(self.commission_per_share * shares, self.commission_min)
+        commission = entry_commission + exit_commission
+
+        # SELL-side only fees (long -> sell on exit, short -> sell on entry)
+        sell_price = exit_price if side == "long" else entry_price
+        sell_notional = sell_price * shares
+
+        # FINRA TAF: per share, apply cap and minimum (SELL side only)
+        raw_finra = shares * self.finra_fee_per_share
+        finra_fee = max(self.finra_fee_min, min(raw_finra, self.finra_fee_cap))
+
+        # SEC fee (SELL side only; default 0)
+        sec_fee = sell_notional * self.sec_fee_per_dollar
+
+        # Optional pass-through reg fee (SELL side only; default 0)
+        reg_fee = shares * self.reg_fee_per_share
+
+        total = slippage_cost + commission + reg_fee + finra_fee + sec_fee
         
         return {
-            'spread_cost': spread_cost,
+            'slippage': slippage_cost,
             'commission': commission,
+            'reg_fee': reg_fee,
             'sec_fee': sec_fee,
             'finra_fee': finra_fee,
             'total': total
@@ -159,7 +177,8 @@ class TradingSession:
     # Session state
     phase: SessionPhase = SessionPhase.PRE_MARKET
     detected_regime: Optional[Regime] = None
-    selected_strategy: Optional[str] = None
+    active_strategies: List[str] = field(default_factory=list)
+    selected_strategy: Optional[str] = None  # Helper for backwards compat logic
     
     # Data storage
     bars: List[BarData] = field(default_factory=list)
@@ -183,6 +202,8 @@ class TradingSession:
     start_price: Optional[float] = None
     end_price: Optional[float] = None
     total_pnl: float = 0.0
+    regime_start_ts: Optional[datetime] = None
+    account_size_usd: float = 10_000.0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -209,10 +230,24 @@ class DayTradingManager:
     Each session is identified by run_id + ticker + date.
     """
     
-    def __init__(self, regime_detection_minutes: int = 15, trading_costs: TradingCosts = None):
+    def __init__(
+        self,
+        regime_detection_minutes: int = 5,
+        trading_costs: TradingCosts = None,
+        max_daily_loss: float = 300.0,
+        max_trades_per_day: int = 3,
+    ):
         self.sessions: Dict[str, TradingSession] = {}  # session_key -> TradingSession
         self.regime_detection_minutes = regime_detection_minutes
         self.trading_costs = trading_costs or TradingCosts()
+        self.max_daily_loss = max_daily_loss # Stop trading if loss exceeds this amount
+        self.max_trades_per_day = max_trades_per_day  # Limit trades to reduce fees
+        self.market_tz = ZoneInfo("America/New_York")
+        self.run_defaults: Dict[tuple, Dict[str, Any]] = {}
+        
+        # Cooldown between trades (in bars, assuming 1-min bars)
+        self.trade_cooldown_bars = 15  # 15 minutes between trades
+        self.last_trade_bar_index = {}  # Track last trade bar per session
         
         # Pre-configured strategies
         self.strategies = {
@@ -224,12 +259,33 @@ class DayTradingManager:
         }
         
         # Strategy selection by regime
-        self.regime_strategy_preference = {
-            Regime.TRENDING: ['pullback', 'momentum', 'vwap_magnet'],
+        # Default Preferences
+        self.default_preference = {
+            Regime.TRENDING: ['momentum', 'pullback', 'vwap_magnet', 'mean_reversion'],
             Regime.CHOPPY: ['mean_reversion', 'vwap_magnet'],
-            Regime.MIXED: ['rotation', 'vwap_magnet']
+            Regime.MIXED: ['mean_reversion', 'vwap_magnet', 'rotation']
         }
         
+        # Ticker-Specific Preferences
+        self.ticker_preferences = {
+            "NVDA": {
+                Regime.TRENDING: ['pullback', 'momentum', 'vwap_magnet', 'mean_reversion'],
+                Regime.CHOPPY: [], # NVDA loses in Chop, better to stay out
+                Regime.MIXED: ['vwap_magnet', 'mean_reversion', 'rotation'] # NVDA likes Magnet
+            },
+            "TSLA": {
+                Regime.TRENDING: ['momentum', 'pullback'], # Momentum (-$164) beat Pullback (-$311) and Magnet (-$180) on Jan 26
+                Regime.CHOPPY: [], # MeanReversion lost -$776 Jan 20-28, stay out
+                Regime.MIXED: ['mean_reversion'] # No VWAPMagnet for TSLA
+            }
+        }
+        
+    def _to_market_time(self, ts: datetime) -> datetime:
+        """Convert timestamp to US/Eastern for market-hour comparisons."""
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=ZoneInfo("UTC"))
+        return ts.astimezone(self.market_tz)
+
     def _get_session_key(self, run_id: str, ticker: str, date: str) -> str:
         """Generate unique session key."""
         return f"{run_id}:{ticker}:{date}"
@@ -251,8 +307,29 @@ class DayTradingManager:
                 date=date,
                 regime_detection_minutes=regime_detection_minutes or self.regime_detection_minutes
             )
+            
+            # Rule: No Fridays (Day 4)
+            # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
+            if datetime.strptime(date, "%Y-%m-%d").weekday() == 4:
+                self.sessions[key].phase = SessionPhase.CLOSED
         
         return self.sessions[key]
+
+    def set_run_defaults(
+        self,
+        run_id: str,
+        ticker: str,
+        regime_detection_minutes: Optional[int] = None,
+        account_size_usd: Optional[float] = None
+    ) -> None:
+        """Set default parameters for all sessions in a run."""
+        key = (run_id, ticker)
+        defaults = self.run_defaults.get(key, {})
+        if regime_detection_minutes is not None:
+            defaults["regime_detection_minutes"] = regime_detection_minutes
+        if account_size_usd is not None:
+            defaults["account_size_usd"] = account_size_usd
+        self.run_defaults[key] = defaults
     
     def get_session(self, run_id: str, ticker: str, date: str) -> Optional[TradingSession]:
         """Get existing session."""
@@ -278,8 +355,25 @@ class DayTradingManager:
         Returns:
             Processing result with signals, trades, etc.
         """
-        date = timestamp.strftime('%Y-%m-%d')
-        session = self.get_or_create_session(run_id, ticker, date)
+        market_ts = self._to_market_time(timestamp)
+        date = market_ts.strftime('%Y-%m-%d')
+        defaults = self.run_defaults.get((run_id, ticker), {})
+        session = self.get_or_create_session(
+            run_id,
+            ticker,
+            date,
+            regime_detection_minutes=defaults.get("regime_detection_minutes")
+        )
+        if "account_size_usd" in defaults:
+            session.account_size_usd = defaults["account_size_usd"]
+        if session.phase == SessionPhase.CLOSED:
+             return {'action': 'skipped_finished_session'}
+        
+        # Debug
+        # print(f"Processing bar {timestamp}, phase: {session.phase}")
+        
+        # Debug logging
+        # print(f"DEBUG: Processing bar for {run_id}, key: {self._get_session_key(run_id, ticker, date)}")
         
         # Create bar
         bar = BarData(
@@ -292,7 +386,7 @@ class DayTradingManager:
             vwap=bar_data.get('vwap')
         )
         
-        bar_time = timestamp.time()
+        bar_time = market_ts.time()
         result = {
             'session_key': self._get_session_key(run_id, ticker, date),
             'bar_timestamp': timestamp.isoformat(),
@@ -317,41 +411,60 @@ class DayTradingManager:
             session.phase = SessionPhase.REGIME_DETECTION
             session.bars.append(bar)
             session.start_price = bar.close
+            session.regime_start_ts = datetime.combine(
+                market_ts.date(),
+                session.market_open,
+                tzinfo=self.market_tz
+            )
             result['action'] = 'started_regime_detection'
             
         elif session.phase == SessionPhase.REGIME_DETECTION:
             session.bars.append(bar)
             
-            # Check if we have enough data for regime detection
-            minutes_elapsed = len(session.bars)  # Assuming 1-minute bars
+            # Check if we have enough time for regime detection
+            if session.regime_start_ts is None:
+                session.regime_start_ts = datetime.combine(
+                    market_ts.date(),
+                    session.market_open,
+                    tzinfo=self.market_tz
+                )
+            elapsed_minutes = (market_ts - session.regime_start_ts).total_seconds() / 60.0
             
-            if minutes_elapsed >= session.regime_detection_minutes:
+            if elapsed_minutes >= session.regime_detection_minutes:
                 # Detect regime
                 regime = self._detect_regime(session)
                 session.detected_regime = regime
                 
-                # Select best strategy for this regime
-                strategy_name = self._select_strategy(session)
-                session.selected_strategy = strategy_name
+                # Select BEST strategies for this regime
+                active_strategies = self._select_strategies(session)
+                session.active_strategies = active_strategies
+                session.selected_strategy = active_strategies[0] if active_strategies else None
                 
                 # Transition to trading
                 session.phase = SessionPhase.TRADING
                 result['action'] = 'regime_detected'
                 result['regime'] = regime.value
-                result['strategy'] = strategy_name
+                result['strategies'] = active_strategies
+                # print(f"DEBUG: Regime DETECTED {regime} at {timestamp}. Strategy: {active_strategies[0]}", flush=True)
                 
                 # Include indicator values for frontend decision markers
                 indicators = self._calculate_indicators(session.bars)
                 result['indicators'] = {
                     'trend_efficiency': self._calc_trend_efficiency(session.bars),
                     'volatility': self._calc_volatility(session.bars),
-                    'atr': indicators.get('atr', [0])[-1] if indicators.get('atr') else 0
+                    'atr': indicators.get('atr', [0])[-1] if indicators.get('atr') else 0,
+                    'adx': indicators.get('adx', [0])[-1] if indicators.get('adx') else 0
                 }
             else:
                 result['action'] = 'collecting_regime_data'
-                result['minutes_remaining'] = session.regime_detection_minutes - minutes_elapsed
+                minutes_elapsed = int(elapsed_minutes)
+                result['minutes_remaining'] = max(
+                    0,
+                    session.regime_detection_minutes - minutes_elapsed
+                )
                 
         elif session.phase == SessionPhase.TRADING:
+            # print(f"DEBUG: TRADING Phase. Bar: {timestamp}", flush=True)
             session.bars.append(bar)
             
             # Check for end of day
@@ -380,15 +493,15 @@ class DayTradingManager:
     def _detect_regime(self, session: TradingSession) -> Regime:
         """Detect market regime from collected bars."""
         # Combine pre-market and regular bars for analysis
-        all_bars = session.pre_market_bars + session.bars
+        all_bars = session.bars
         
-        if len(all_bars) < 10:
+        if len(all_bars) < 20:
             return Regime.MIXED
         
         # Calculate trend efficiency
-        closes = [b.close for b in all_bars[-min(len(all_bars), 30):]]
+        closes = [b.close for b in all_bars[-min(len(all_bars), 60):]]
         
-        if len(closes) < 5:
+        if len(closes) < 10:
             return Regime.MIXED
         
         # Net move vs total move
@@ -399,6 +512,9 @@ class DayTradingManager:
             return Regime.MIXED
         
         trend_efficiency = net_move / total_move
+        
+        # Calculate ADX (using all available bars)
+        adx = self._calc_adx(all_bars)
         
         # Calculate volatility
         returns = [(closes[i] - closes[i-1]) / closes[i-1] for i in range(1, len(closes))]
@@ -415,26 +531,52 @@ class DayTradingManager:
             if gap_pct > 1.0:
                 gap_factor = 0.1  # Slight trending bias for gap days
         
-        # Classification
+        # Classification Logic with ADX
         adjusted_efficiency = trend_efficiency + gap_factor
         
-        if adjusted_efficiency >= 0.5:
+        # 1. Strong Trend: High Efficiency OR High ADX
+        if adjusted_efficiency >= 0.6 or adx > 30:
             return Regime.TRENDING
-        elif adjusted_efficiency <= 0.25:
+            
+        # 2. Choppy: Low ADX
+        elif adx < 20:
             return Regime.CHOPPY
+            
+        # 3. Mixed: Anything else
         else:
             return Regime.MIXED
     
-    def _select_strategy(self, session: TradingSession) -> str:
-        """Select best strategy for the detected regime."""
+    def _select_strategies(self, session: TradingSession) -> List[str]:
+        """Select active strategies for the detected regime and ticker."""
         regime = session.detected_regime or Regime.MIXED
+        ticker = session.ticker
         
-        # Get preferred strategies for this regime
-        preferred = self.regime_strategy_preference.get(regime, ['vwap_magnet'])
+        # Get preferences for this ticker, or default
+        prefs = self.ticker_preferences.get(ticker, self.default_preference)
         
-        # For now, return the first preferred strategy
-        # Could be enhanced with historical performance analysis
-        return preferred[0]
+        # Preferred list for this regime
+        preferred = prefs.get(regime, ['mean_reversion'])
+
+        # Filter preferred list by enabled + allowed_regimes
+        filtered = []
+        for name in preferred:
+            strat = self.strategies.get(name)
+            if not strat:
+                continue
+            if not getattr(strat, "enabled", True):
+                continue
+            if hasattr(strat, "allowed_regimes") and regime not in strat.allowed_regimes:
+                continue
+            filtered.append(name)
+
+        # Fallback: any enabled strategy that supports this regime
+        if not filtered:
+            for name, strat in self.strategies.items():
+                if getattr(strat, "enabled", True) and regime in getattr(strat, "allowed_regimes", [regime]):
+                    filtered.append(name)
+
+        # Return only the top choice to keep behaviour deterministic
+        return filtered[:1]
     
     def _calc_trend_efficiency(self, bars: List[BarData]) -> float:
         """Calculate trend efficiency (net move / total move)."""
@@ -462,6 +604,80 @@ class DayTradingManager:
         variance = sum((r - avg_return) ** 2 for r in returns) / len(returns)
         
         return round(variance ** 0.5, 3)
+
+    def _calc_adx(self, bars: List[BarData], period: int = 14) -> float:
+        """Calculate ADX from bar data."""
+        if len(bars) < period * 2:
+            return 0.0
+            
+        highs = [b.high for b in bars]
+        lows = [b.low for b in bars]
+        closes = [b.close for b in bars]
+        
+        tr_list = []
+        dm_plus_list = []
+        dm_minus_list = []
+        
+        for i in range(1, len(bars)):
+            # True Range
+            hl = highs[i] - lows[i]
+            hc = abs(highs[i] - closes[i-1])
+            lc = abs(lows[i] - closes[i-1])
+            tr = max(hl, hc, lc)
+            tr_list.append(tr)
+            
+            # Directional Movement
+            up_move = highs[i] - highs[i-1]
+            down_move = lows[i-1] - lows[i]
+            
+            if up_move > down_move and up_move > 0:
+                dm_plus_list.append(up_move)
+            else:
+                dm_plus_list.append(0.0)
+                
+            if down_move > up_move and down_move > 0:
+                dm_minus_list.append(down_move)
+            else:
+                dm_minus_list.append(0.0)
+        
+        # Need enough data for Wilder's smoothing
+        if len(tr_list) < period:
+            return 0.0
+            
+        # Initial smoothed averages (using simple average for first period)
+        tr_smooth = sum(tr_list[:period])
+        dm_plus_smooth = sum(dm_plus_list[:period])
+        dm_minus_smooth = sum(dm_minus_list[:period])
+        
+        adx_values = []
+        
+        # Calculate smoothed values for the rest
+        for i in range(period, len(tr_list)):
+            tr_smooth = tr_smooth - (tr_smooth / period) + tr_list[i]
+            dm_plus_smooth = dm_plus_smooth - (dm_plus_smooth / period) + dm_plus_list[i]
+            dm_minus_smooth = dm_minus_smooth - (dm_minus_smooth / period) + dm_minus_list[i]
+            
+            if tr_smooth == 0:
+                di_plus = 0
+                di_minus = 0
+            else:
+                di_plus = 100 * (dm_plus_smooth / tr_smooth)
+                di_minus = 100 * (dm_minus_smooth / tr_smooth)
+            
+            dx = 0
+            if di_plus + di_minus > 0:
+                dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+            
+            # ADX Smoothing
+            if len(adx_values) == 0:
+                adx_values.append(dx) # Initial ADX is just DX
+            else:
+                # Wilder's smoothing for ADX
+                prev_adx = adx_values[-1]
+                adx = (prev_adx * (period - 1) + dx) / period
+                adx_values.append(adx)
+                
+        return round(adx_values[-1], 2) if adx_values else 0.0
     
     def _process_trading_bar(
         self, 
@@ -520,18 +736,72 @@ class DayTradingManager:
                 trade = self._close_position(session, current_price, timestamp, exit_reason)
                 result['trade_closed'] = trade.to_dict()
                 result['action'] = f'position_closed_{exit_reason}'
-                # Include position_closed info for frontend markers
+                # Include position_closed info for frontend markers with detailed data
                 result['position_closed'] = {
                     'exit_price': trade.exit_price,
                     'side': trade.side,
                     'exit_reason': exit_reason,
                     'pnl_pct': trade.pnl_pct,
                     'pnl_dollars': trade.pnl_dollars,
-                    'strategy': trade.strategy
+                    'strategy': trade.strategy,
+                    'entry_price': trade.entry_price,
+                    'entry_time': trade.entry_time.isoformat(),
+                    'exit_time': trade.exit_time.isoformat(),
+                    'size': trade.size,
+                    'bars_held': len([b for b in session.bars if b.timestamp >= trade.entry_time and b.timestamp <= trade.exit_time]),
+                    'costs': {
+                        'slippage': round(trade.slippage, 4),
+                        'commission': round(trade.commission, 4),
+                        'reg_fee': round(trade.reg_fee, 4),
+                        'sec_fee': round(trade.sec_fee, 6),
+                        'finra_fee': round(trade.finra_fee, 6),
+                        'total': round(trade.total_costs, 4)
+                    }
                 }
         
-        # If no position, look for entry signals
+        # Custom Rule: Max Daily Loss Circuit Breaker
+        current_pnl = sum(t.pnl_dollars for t in session.trades)
+        
+        if current_pnl < -self.max_daily_loss:
+             if session.active_position:
+                 trade = self._close_position(session, current_price, timestamp, "max_daily_loss")
+                 result['trade_closed'] = trade.to_dict()
+                 result['action'] = 'max_loss_stop'
+                 result['position_closed'] = {
+                    'exit_price': trade.exit_price,
+                    'side': trade.side,
+                    'exit_reason': 'max_daily_loss',
+                    'pnl_pct': trade.pnl_pct,
+                    'pnl_dollars': trade.pnl_dollars,
+                    'strategy': trade.strategy
+                 }
+            
+             # Stop trading for the day
+             session.phase = SessionPhase.END_OF_DAY
+             session.end_price = current_price
+             result['session_summary'] = self._get_session_summary(session)
+             return result
+
+
         if not session.active_position and session.selected_strategy:
+            # Check trade limits
+            session_key = self._get_session_key(session.run_id, session.ticker, session.date)
+            current_bar_index = len(session.bars)
+            
+            # Check max trades per day
+            if len(session.trades) >= self.max_trades_per_day:
+                result['action'] = 'trade_limit_reached'
+                result['reason'] = f'Max trades per day ({self.max_trades_per_day}) reached'
+                return result
+            
+            # Check cooldown between trades
+            last_trade_bar = self.last_trade_bar_index.get(session_key, -self.trade_cooldown_bars)
+            bars_since_last_trade = current_bar_index - last_trade_bar
+            if bars_since_last_trade < self.trade_cooldown_bars:
+                result['action'] = 'cooldown_active'
+                result['reason'] = f'Cooldown: {self.trade_cooldown_bars - bars_since_last_trade} bars remaining'
+                return result
+            
             signal = self._generate_signal(session, bar, timestamp)
             
             if signal:
@@ -542,6 +812,7 @@ class DayTradingManager:
                 # Execute signal
                 if signal.signal_type in [SignalType.BUY, SignalType.SELL]:
                     position = self._open_position(session, signal)
+                    self.last_trade_bar_index[session_key] = current_bar_index
                     result['action'] = 'position_opened'
                     result['position'] = position.to_dict()
                     # Include position_opened info for frontend markers
@@ -551,7 +822,10 @@ class DayTradingManager:
                         'strategy': position.strategy_name,
                         'size': position.size,
                         'stop_loss': position.stop_loss,
-                        'take_profit': position.take_profit
+                        'take_profit': position.take_profit,
+                        'reasoning': signal.reasoning,
+                        'confidence': signal.confidence,
+                        'metadata': signal.metadata
                     }
         
         return result
@@ -562,15 +836,19 @@ class DayTradingManager:
         bar: BarData, 
         timestamp: datetime
     ) -> Optional[Signal]:
-        """Generate trading signal using selected strategy."""
-        strategy_name = session.selected_strategy
+        """
+        Generate trading signal using ALL active strategies.
+        Returns the signal with highest confidence.
+        """
+        active_strategies = session.active_strategies
+        if not active_strategies:
+            # Fallback for old sessions or empty list
+            if session.selected_strategy:
+                active_strategies = [session.selected_strategy]
+            else:
+                return None
         
-        if not strategy_name or strategy_name not in self.strategies:
-            return None
-        
-        strategy = self.strategies[strategy_name]
-        
-        # Prepare OHLCV data
+        # Prepare data once
         bars = session.bars[-100:] if len(session.bars) >= 100 else session.bars
         ohlcv = {
             'open': [b.open for b in bars],
@@ -579,20 +857,38 @@ class DayTradingManager:
             'close': [b.close for b in bars],
             'volume': [b.volume for b in bars]
         }
-        
-        # Calculate basic indicators
         indicators = self._calculate_indicators(bars)
+        regime = session.detected_regime or Regime.MIXED
+
+        candidate_signals = []
+
+        for strategy_name in active_strategies:
+            if strategy_name not in self.strategies:
+                continue
+            
+            strategy = self.strategies[strategy_name]
+            
+            # Generate signal
+            signal = strategy.generate_signal(
+                current_price=bar.close,
+                ohlcv=ohlcv,
+                indicators=indicators,
+                regime=regime,
+                timestamp=timestamp
+            )
+            
+            if signal:
+                candidate_signals.append(signal)
         
-        # Generate signal
-        signal = strategy.generate_signal(
-            current_price=bar.close,
-            ohlcv=ohlcv,
-            indicators=indicators,
-            regime=session.detected_regime or Regime.MIXED,
-            timestamp=timestamp
-        )
+        if not candidate_signals:
+            return None
+            
+        # Select best signal based on confidence
+        # Tie-break: Prefer Momentum in Trend, MeanRev in Chop
+        candidate_signals.sort(key=lambda s: s.confidence, reverse=True)
+        best_signal = candidate_signals[0]
         
-        return signal
+        return best_signal
     
     def _calculate_indicators(self, bars: List[BarData]) -> Dict[str, Any]:
         """Calculate indicators from bars."""
@@ -686,18 +982,27 @@ class DayTradingManager:
                 vwap.append(cum_pv / cum_vol if cum_vol > 0 else typical_price)
             indicators['vwap'] = vwap
         
+        # Calculate ADX series for indicators
+        adx_val = self._calc_adx(bars, 14)
+        # Populate full series with final value for simplicity
+        indicators['adx'] = [adx_val] * len(closes)
+        
         return indicators
     
     def _open_position(self, session: TradingSession, signal: Signal) -> Position:
         """Open a new position from signal."""
         side = 'long' if signal.signal_type == SignalType.BUY else 'short'
+        capital_usd = max(0.0, session.account_size_usd)
+        size = round(capital_usd / signal.price, 4) if signal.price > 0 else 0.0
+        if size <= 0:
+            size = 0.0
         
         position = Position(
             strategy_name=signal.strategy_name,
             entry_price=signal.price,
             entry_time=signal.timestamp,
             side=side,
-            size=1.0,
+            size=size,  # Full notional allocation
             stop_loss=signal.stop_loss or 0,
             take_profit=signal.take_profit or 0,
             trailing_stop_active=signal.trailing_stop,
@@ -754,11 +1059,12 @@ class DayTradingManager:
             pnl_dollars=net_pnl_dollars,
             exit_reason=reason,
             # Cost breakdown
-            spread_cost=costs['spread_cost'],
-            commission=costs['commission'],
-            sec_fee=costs['sec_fee'],
-            finra_fee=costs['finra_fee'],
-            total_costs=costs['total'],
+            slippage=costs.get('slippage', 0.0),
+            commission=costs.get('commission', 0.0),
+            reg_fee=costs.get('reg_fee', 0.0),
+            sec_fee=costs.get('sec_fee', 0.0),
+            finra_fee=costs.get('finra_fee', 0.0),
+            total_costs=costs.get('total', 0.0),
             gross_pnl_pct=gross_pnl_pct
         )
         
@@ -796,6 +1102,7 @@ class DayTradingManager:
             'winning_trades': len(winning),
             'losing_trades': len(losing),
             'win_rate': len(winning) / len(trades) * 100 if trades else 0,
+            'trades': [t.to_dict() for t in trades],
             'total_pnl_pct': round(session.total_pnl, 2),
             'avg_pnl_pct': round(session.total_pnl / len(trades), 2) if trades else 0,
             'best_trade': round(max(t.pnl_pct for t in trades), 2) if trades else 0,

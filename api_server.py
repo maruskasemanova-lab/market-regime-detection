@@ -12,6 +12,7 @@ from datetime import datetime
 
 from src.strategy_engine import StrategyEngine
 from src.day_trading_manager import DayTradingManager
+from src.strategies.base_strategy import Regime
 
 
 
@@ -35,7 +36,7 @@ app.add_middleware(
 engine = StrategyEngine(backtest_api_url="http://localhost:8000")
 
 # Day trading manager for session-based API
-day_trading_manager = DayTradingManager(regime_detection_minutes=15)
+day_trading_manager = DayTradingManager(regime_detection_minutes=5)
 
 
 # ============ Pydantic Models ============
@@ -43,6 +44,11 @@ day_trading_manager = DayTradingManager(regime_detection_minutes=15)
 class StrategyToggle(BaseModel):
     strategy_name: str
     enabled: bool
+    
+
+class StrategyUpdate(BaseModel):
+    strategy_name: str
+    params: Dict[str, Any]
 
 
 class TrailingStopConfig(BaseModel):
@@ -126,9 +132,30 @@ def _get_regime_description(regime: str) -> str:
     return descriptions.get(regime, "Unknown regime")
 
 
+def _coerce_regimes(reg_list):
+    """Accept list of Regime enums or strings; return list[Regime]."""
+    normalized = []
+    for r in reg_list:
+        if isinstance(r, Regime):
+            normalized.append(r)
+        else:
+            try:
+                normalized.append(Regime[str(r).upper()])
+            except Exception:
+                continue
+    return normalized
+
+
 @app.get("/api/strategies")
 async def get_strategies():
     """Get all strategies with their configuration."""
+    # Normalize allowed_regimes to Regime enums to avoid serialization errors
+    for strat in engine.strategies.values():
+        if hasattr(strat, "allowed_regimes"):
+            strat.allowed_regimes = _coerce_regimes(getattr(strat, "allowed_regimes"))
+    for strat in day_trading_manager.strategies.values():
+        if hasattr(strat, "allowed_regimes"):
+            strat.allowed_regimes = _coerce_regimes(getattr(strat, "allowed_regimes"))
     return {
         name: strategy.to_dict() 
         for name, strategy in engine.strategies.items()
@@ -144,11 +171,48 @@ async def toggle_strategy(config: StrategyToggle):
         raise HTTPException(status_code=404, detail=f"Strategy {config.strategy_name} not found")
     
     engine.strategies[strat_name].enabled = config.enabled
+    # Keep day-trading manager in sync for session-based trading
+    if strat_name in day_trading_manager.strategies:
+        day_trading_manager.strategies[strat_name].enabled = config.enabled
     
     return {
         "strategy": config.strategy_name,
         "enabled": config.enabled,
         "message": f"Strategy {config.strategy_name} {'enabled' if config.enabled else 'disabled'}"
+    }
+
+
+@app.post("/api/strategies/update")
+async def update_strategy(config: StrategyUpdate):
+    """Update editable parameters of a strategy (numeric fields + allowed_regimes)."""
+    strat_name = config.strategy_name.lower().replace(' ', '_')
+    
+    if strat_name not in engine.strategies:
+        raise HTTPException(status_code=404, detail=f"Strategy {config.strategy_name} not found")
+    
+    strat = engine.strategies[strat_name]
+    dtm_strat = day_trading_manager.strategies.get(strat_name)
+    
+    updated_fields = {}
+    for key, val in config.params.items():
+        if key == "allowed_regimes" and isinstance(val, list):
+            regimes = _coerce_regimes(val)
+            setattr(strat, "allowed_regimes", regimes)
+            updated_fields[key] = [r.value for r in regimes]
+            if dtm_strat:
+                setattr(dtm_strat, "allowed_regimes", regimes)
+            continue
+        # Only update existing attributes and basic numeric/bool/str types
+        if hasattr(strat, key) and isinstance(val, (int, float, bool, str, type(None))):
+            setattr(strat, key, val)
+            updated_fields[key] = val
+            if dtm_strat and hasattr(dtm_strat, key):
+                setattr(dtm_strat, key, val)
+    
+    return {
+        "strategy": config.strategy_name,
+        "updated": updated_fields,
+        "current": strat.to_dict()
     }
 
 
@@ -353,13 +417,27 @@ async def clear_session(run_id: str, ticker: str, date: str):
 
 
 @app.post("/api/session/config")
-async def configure_session(run_id: str, ticker: str, date: str, regime_detection_minutes: int = 15):
+async def configure_session(
+    run_id: str,
+    ticker: str,
+    date: str,
+    regime_detection_minutes: int = 15,
+    account_size_usd: float = 10_000.0,
+):
     """Configure session parameters before processing."""
     session = day_trading_manager.get_or_create_session(
         run_id=run_id,
         ticker=ticker,
         date=date,
         regime_detection_minutes=regime_detection_minutes
+    )
+    session.regime_detection_minutes = regime_detection_minutes
+    session.account_size_usd = account_size_usd
+    day_trading_manager.set_run_defaults(
+        run_id=run_id,
+        ticker=ticker,
+        regime_detection_minutes=regime_detection_minutes,
+        account_size_usd=account_size_usd,
     )
     
     return {
@@ -442,4 +520,3 @@ if __name__ == "__main__":
     print("=" * 60)
     
     uvicorn.run(app, host="0.0.0.0", port=8001)
-

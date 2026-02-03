@@ -23,11 +23,11 @@ class RotationStrategy(BaseStrategy):
     
     def __init__(
         self,
-        lookback_period: int = 20,            # Period for relative strength
-        rotation_threshold: float = 2.0,      # Min % diff to trigger rotation
-        atr_stop_mult: float = 2.5,           # Wider stop for mixed markets
-        min_confidence: float = 55.0,         # Lower bar (mixed is uncertain)
-        trailing_stop_pct: float = 1.0        # Wider trailing for chop
+        lookback_period: int = 10,            # Lowered from 20 for faster signal
+        rotation_threshold: float = 0.5,      # Lowered from 2.0% (too high for 20 mins)
+        atr_stop_mult: float = 3.0,
+        min_confidence: float = 50.0,         # Lowered from 55.0
+        trailing_stop_pct: float = 1.0
     ):
         super().__init__(
             name="Rotation",
@@ -82,6 +82,9 @@ class RotationStrategy(BaseStrategy):
         # Calculate relative performance metrics
         lookback_close = closes[-self.lookback_period]
         performance = (current_price - lookback_close) / lookback_close * 100
+        
+        # Debug logging
+        # print(f"DEBUG: Rotation - Perf: {performance:.2f}%, Threshold: {self.rotation_threshold}%")
         
         # VWAP distance as rotation signal
         vwap_distance = (current_price - vwap_val) / vwap_val * 100

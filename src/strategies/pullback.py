@@ -1,6 +1,6 @@
 """
 Pullback Strategy - For TRENDING regime.
-Waits for pullback to support/EMA in an established trend.
+Trades pullbacks to EMA/VWAP in established trends.
 """
 from typing import Optional, Dict, Any, List
 from datetime import datetime
@@ -13,23 +13,22 @@ class PullbackStrategy(BaseStrategy):
     Pullback Strategy for trending markets.
     
     Logic:
-    - Identify trend direction using EMA/SMA crossover
-    - Wait for pullback to EMA or VWAP
-    - Enter on bounce with volume confirmation
-    - Trail stop with trend
+    - Identify strong trend (ADX > 25, Price vs VWAP, EMA align)
+    - Wait for pullback to EMA/VWAP zone
+    - Enter on CONFIRMED bounce (break of previous candle high)
     
     Best in: TRENDING regime
     """
     
     def __init__(
         self,
-        pullback_threshold_pct: float = 0.5,  # Min pullback to trigger
-        ma_fast_period: int = 10,             # Fast MA period
-        ma_slow_period: int = 20,             # Slow MA period
-        atr_stop_mult: float = 2.0,           # Stop multiplier
-        rr_ratio: float = 2.5,                # Risk:Reward ratio
-        min_confidence: float = 65.0,         # Min confidence
-        trailing_stop_pct: float = 0.8        # Trailing stop pct
+        pullback_threshold_pct: float = 0.5,  # Tighter zone relative to slower MA
+        ma_fast_period: int = 50,             # ~10 EMA on 5m chart
+        ma_slow_period: int = 100,            # ~20 EMA on 5m chart
+        atr_stop_mult: float = 3.0,           # Wider stop for noise
+        rr_ratio: float = 1.5,                # Lower R:R target (high win rate focus)
+        min_confidence: float = 65.0,         # Standard confidence (was 70.0)
+        trailing_stop_pct: float = 1.0        # Looser trail
     ):
         super().__init__(
             name="Pullback",
@@ -53,12 +52,6 @@ class PullbackStrategy(BaseStrategy):
     ) -> Optional[Signal]:
         """
         Generate pullback signal.
-        
-        Entry conditions:
-        - Trend established (EMA fast > EMA slow for uptrend)
-        - Price pulls back toward EMA/VWAP
-        - Price shows bounce (current bar closing in trend direction)
-        - Volume picks up on bounce
         """
         if not self.is_allowed_in_regime(regime):
             return None
@@ -67,21 +60,22 @@ class PullbackStrategy(BaseStrategy):
             return None
         
         # Get indicators
-        ema_fast = indicators.get('ema_fast') or indicators.get('ema')
-        ema_slow = indicators.get('ema_slow') or indicators.get('sma')
+        ema_f = indicators.get('ema') or indicators.get('ema_fast')
+        ema_s = indicators.get('ema_slow')
         vwap = indicators.get('vwap')
         atr = indicators.get('atr')
         rsi = indicators.get('rsi')
+        adx = indicators.get('adx')
         
-        if ema_fast is None or ema_slow is None or atr is None:
+        if ema_f is None or ema_s is None or atr is None:
             return None
             
-        # Get latest values
-        ema_f = ema_fast[-1] if isinstance(ema_fast, list) else ema_fast
-        ema_s = ema_slow[-1] if isinstance(ema_slow, list) else ema_slow
+        ema_f = ema_f[-1] if isinstance(ema_f, list) else (ema_f or current_price)
+        ema_s = ema_s[-1] if isinstance(ema_s, list) else (ema_s or current_price)
         vwap_val = vwap[-1] if isinstance(vwap, list) else (vwap or current_price)
         atr_val = atr[-1] if isinstance(atr, list) else atr
         rsi_val = rsi[-1] if isinstance(rsi, list) else (rsi or 50)
+        adx_val = adx[-1] if isinstance(adx, list) else (adx or 0)
         
         # Get OHLC
         opens = ohlcv.get('open', [])
@@ -90,10 +84,9 @@ class PullbackStrategy(BaseStrategy):
         closes = ohlcv.get('close', [])
         volumes = ohlcv.get('volume', [])
         
-        if len(closes) < 5:
+        if len(closes) < 20:
             return None
             
-        # Calculate average volume
         avg_volume = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else 0
         current_volume = volumes[-1] if volumes else 0
         
@@ -101,148 +94,132 @@ class PullbackStrategy(BaseStrategy):
         confidence = 50.0
         reasoning_parts = []
         
-        # Determine trend
-        uptrend = ema_f > ema_s
-        downtrend = ema_f < ema_s
+        # Determine trend (Relaxed ADX)
+        uptrend = ema_f > ema_s and current_price > vwap_val and adx_val > 20
+        downtrend = ema_f < ema_s and current_price < vwap_val and adx_val > 20
         
         # Calculate recent swing high/low
         recent_high = max(highs[-10:]) if len(highs) >= 10 else max(highs)
         recent_low = min(lows[-10:]) if len(lows) >= 10 else min(lows)
         
-        # LONG SIGNAL: Uptrend with pullback
+        # LONG SIGNAL: Uptrend + Pullback + Bounce
         if uptrend:
-            reasoning_parts.append(f"Uptrend (EMA{self.ma_fast_period} > EMA{self.ma_slow_period})")
+            reasoning_parts.append(f"Uptrend (ADX {adx_val:.1f})")
             
-            # Check for pullback to EMA or VWAP
-            pullback_target = max(ema_f, vwap_val)
-            distance_to_target = (current_price - pullback_target) / pullback_target * 100
-            
-            # Want price near or just above the pullback target
-            if -self.pullback_threshold_pct <= distance_to_target <= self.pullback_threshold_pct * 2:
+            # Check if we are in a pullback (Price < EMA Fast)
+            # OR if we are just finding support at EMA Slow/VWAP
+            if current_price < ema_f or current_price < ema_s:
                 confidence += 15
-                reasoning_parts.append(f"At pullback zone ({distance_to_target:.2f}% from EMA/VWAP)")
+                reasoning_parts.append("In pullback zone")
                 
-                # Check for bounce - current close > open
-                if len(closes) >= 2 and closes[-1] > opens[-1]:
-                    confidence += 15
-                    reasoning_parts.append("Bullish bounce candle")
+                # Check for bounce: Green candle
+                if closes[-1] > opens[-1]:
+                    # Quality Check: Strong close (upper half) OR Volume surge
+                    midpoint = (highs[-1] + lows[-1]) / 2
+                    is_strong_close = closes[-1] > midpoint
+                    is_volume_surge = current_volume > avg_volume * 1.2
                     
-                    # Check if bouncing off low
-                    if lows[-1] <= pullback_target <= closes[-1]:
+                    if is_strong_close or is_volume_surge:
+                        confidence += 25
+                        if is_strong_close: reasoning_parts.append("Strong close")
+                        if is_volume_surge: reasoning_parts.append("Volume surge")
+                        
+                        # RSI Check (room to run)
+                        if rsi_val < 70:
+                            confidence += 10
+                            reasoning_parts.append(f"RSI ok ({rsi_val:.1f})")
+                    
+                    # RSI hooking up
+                    if rsi_val > 40 and rsi_val < 60:
                         confidence += 10
-                        reasoning_parts.append("Bounce confirmed from support")
-                
-                # RSI not overbought
-                if 40 <= rsi_val <= 60:
-                    confidence += 10
-                    reasoning_parts.append(f"RSI neutral ({rsi_val:.1f})")
-                elif rsi_val < 40:
-                    confidence += 5
-                    reasoning_parts.append(f"RSI weak but still uptrend")
-                
-                # Volume confirmation
-                if current_volume > avg_volume:
-                    confidence += 10
-                    reasoning_parts.append("Volume increasing on bounce")
-                
-                if confidence >= self.min_confidence:
-                    stop_loss = min(recent_low, current_price - atr_val * self.atr_stop_mult)
-                    take_profit = self.calculate_take_profit(current_price, stop_loss, self.rr_ratio, 'long')
-                    
-                    signal = Signal(
-                        strategy_name=self.name,
-                        signal_type=SignalType.BUY,
-                        price=current_price,
-                        timestamp=timestamp,
-                        confidence=min(confidence, 100),
-                        stop_loss=stop_loss,
-                        take_profit=take_profit,
-                        trailing_stop=True,
-                        trailing_stop_pct=self.trailing_stop_pct,
-                        reasoning=" | ".join(reasoning_parts),
-                        metadata={
-                            'ema_fast': ema_f,
-                            'ema_slow': ema_s,
-                            'vwap': vwap_val,
-                            'atr': atr_val,
-                            'rsi': rsi_val,
-                            'recent_low': recent_low,
-                            'regime': regime.value
-                        }
-                    )
-        
-        # SHORT SIGNAL: Downtrend with pullback
+                        reasoning_parts.append(f"RSI in buy zone ({rsi_val:.1f})")
+
+                    if confidence >= self.min_confidence:
+                        stop_loss = min(lows[-5:], default=current_price * 0.99)
+                        # Ensure stop is not too far
+                        max_stop_dist = atr_val * self.atr_stop_mult
+                        if current_price - stop_loss > max_stop_dist:
+                            stop_loss = current_price - max_stop_dist
+                            
+                        take_profit = self.calculate_take_profit(current_price, stop_loss, self.rr_ratio, 'long')
+                        
+                        signal = Signal(
+                            strategy_name=self.name,
+                            signal_type=SignalType.BUY,
+                            price=current_price,
+                            timestamp=timestamp,
+                            confidence=min(confidence, 100),
+                            stop_loss=stop_loss,
+                            take_profit=take_profit,
+                            trailing_stop=True,
+                            trailing_stop_pct=self.trailing_stop_pct,
+                            reasoning=" | ".join(reasoning_parts),
+                            metadata={
+                                'vwap': vwap_val,
+                                'adx': adx_val,
+                                'regime': regime.value
+                            }
+                        )
+
+        # SHORT SIGNAL: Downtrend + Pullback + Rejection
         elif downtrend:
-            reasoning_parts.append(f"Downtrend (EMA{self.ma_fast_period} < EMA{self.ma_slow_period})")
+            reasoning_parts.append(f"Downtrend (ADX {adx_val:.1f})")
             
-            pullback_target = min(ema_f, vwap_val)
-            distance_to_target = (current_price - pullback_target) / pullback_target * 100
-            
-            # Want price near or just below the pullback target
-            if -self.pullback_threshold_pct * 2 <= distance_to_target <= self.pullback_threshold_pct:
+            # Check if we are in a pullback (Price > EMA Fast)
+            if current_price > ema_f or current_price > ema_s:
                 confidence += 15
-                reasoning_parts.append(f"At pullback zone ({distance_to_target:.2f}% from EMA/VWAP)")
+                reasoning_parts.append("In pullback zone")
                 
-                # Check for rejection - current close < open
-                if len(closes) >= 2 and closes[-1] < opens[-1]:
-                    confidence += 15
-                    reasoning_parts.append("Bearish rejection candle")
+                # Check for rejection: Red candle
+                if closes[-1] < opens[-1]:
+                    # Quality Check: Weak close (lower half) OR Volume surge
+                    midpoint = (highs[-1] + lows[-1]) / 2
+                    is_weak_close = closes[-1] < midpoint
+                    is_volume_surge = current_volume > avg_volume * 1.2
                     
-                    if highs[-1] >= pullback_target >= closes[-1]:
+                    if is_weak_close or is_volume_surge:
+                        confidence += 25
+                        if is_weak_close: reasoning_parts.append("Weak close")
+                        if is_volume_surge: reasoning_parts.append("Volume surge")
+
+                        # RSI Check (room to run)
+                        if rsi_val > 30:
+                            confidence += 10
+                            reasoning_parts.append(f"RSI ok ({rsi_val:.1f})")
+                    
+                    # RSI hooking down
+                    if rsi_val < 60 and rsi_val > 40:
                         confidence += 10
-                        reasoning_parts.append("Rejection confirmed from resistance")
-                
-                # RSI not oversold
-                if 40 <= rsi_val <= 60:
-                    confidence += 10
-                    reasoning_parts.append(f"RSI neutral ({rsi_val:.1f})")
-                elif rsi_val > 60:
-                    confidence += 5
-                    reasoning_parts.append(f"RSI strong but still downtrend")
-                
-                if current_volume > avg_volume:
-                    confidence += 10
-                    reasoning_parts.append("Volume increasing on rejection")
-                
-                if confidence >= self.min_confidence:
-                    stop_loss = max(recent_high, current_price + atr_val * self.atr_stop_mult)
-                    take_profit = self.calculate_take_profit(current_price, stop_loss, self.rr_ratio, 'short')
-                    
-                    signal = Signal(
-                        strategy_name=self.name,
-                        signal_type=SignalType.SELL,
-                        price=current_price,
-                        timestamp=timestamp,
-                        confidence=min(confidence, 100),
-                        stop_loss=stop_loss,
-                        take_profit=take_profit,
-                        trailing_stop=True,
-                        trailing_stop_pct=self.trailing_stop_pct,
-                        reasoning=" | ".join(reasoning_parts),
-                        metadata={
-                            'ema_fast': ema_f,
-                            'ema_slow': ema_s,
-                            'vwap': vwap_val,
-                            'atr': atr_val,
-                            'rsi': rsi_val,
-                            'recent_high': recent_high,
-                            'regime': regime.value
-                        }
-                    )
+                        reasoning_parts.append(f"RSI in sell zone ({rsi_val:.1f})")
+
+                    if confidence >= self.min_confidence:
+                        stop_loss = max(highs[-5:], default=current_price * 1.01)
+                        # Ensure stop is not too far
+                        max_stop_dist = atr_val * self.atr_stop_mult
+                        if stop_loss - current_price > max_stop_dist:
+                            stop_loss = current_price + max_stop_dist
+
+                        take_profit = self.calculate_take_profit(current_price, stop_loss, self.rr_ratio, 'short')
+                        
+                        signal = Signal(
+                            strategy_name=self.name,
+                            signal_type=SignalType.SELL,
+                            price=current_price,
+                            timestamp=timestamp,
+                            confidence=min(confidence, 100),
+                            stop_loss=stop_loss,
+                            take_profit=take_profit,
+                            trailing_stop=True,
+                            trailing_stop_pct=self.trailing_stop_pct,
+                            reasoning=" | ".join(reasoning_parts),
+                            metadata={
+                                'vwap': vwap_val,
+                                'adx': adx_val,
+                                'regime': regime.value
+                            }
+                        )
         
         if signal:
             self.add_signal(signal)
             
         return signal
-    
-    def to_dict(self) -> Dict[str, Any]:
-        base = super().to_dict()
-        base.update({
-            'pullback_threshold_pct': self.pullback_threshold_pct,
-            'ma_fast_period': self.ma_fast_period,
-            'ma_slow_period': self.ma_slow_period,
-            'atr_stop_mult': self.atr_stop_mult,
-            'rr_ratio': self.rr_ratio,
-            'trailing_stop_pct': self.trailing_stop_pct
-        })
-        return base
