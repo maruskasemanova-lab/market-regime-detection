@@ -25,7 +25,9 @@ class RotationStrategy(BaseStrategy):
         self,
         lookback_period: int = 10,            # Lowered from 20 for faster signal
         rotation_threshold: float = 0.5,      # Lowered from 2.0% (too high for 20 mins)
-        atr_stop_mult: float = 3.0,
+        volume_lookback: int = 10,
+        volume_increase_ratio: float = 1.05,
+        volume_stop_pct: float = 0.9,
         min_confidence: float = 50.0,         # Lowered from 55.0
         trailing_stop_pct: float = 1.0
     ):
@@ -35,7 +37,9 @@ class RotationStrategy(BaseStrategy):
         )
         self.lookback_period = lookback_period
         self.rotation_threshold = rotation_threshold
-        self.atr_stop_mult = atr_stop_mult
+        self.volume_lookback = volume_lookback
+        self.volume_increase_ratio = volume_increase_ratio
+        self.volume_stop_pct = volume_stop_pct
         self.min_confidence = min_confidence
         self.trailing_stop_pct = trailing_stop_pct
         
@@ -59,15 +63,13 @@ class RotationStrategy(BaseStrategy):
         
         # Get indicators
         vwap = indicators.get('vwap')
-        atr = indicators.get('atr')
         rsi = indicators.get('rsi')
         sma = indicators.get('sma')
         ema = indicators.get('ema')
         
-        if atr is None or vwap is None:
+        if vwap is None:
             return None
             
-        atr_val = atr[-1] if isinstance(atr, list) else atr
         vwap_val = vwap[-1] if isinstance(vwap, list) else vwap
         rsi_val = rsi[-1] if isinstance(rsi, list) else (rsi or 50)
         sma_val = sma[-1] if isinstance(sma, list) else (sma or current_price)
@@ -94,9 +96,12 @@ class RotationStrategy(BaseStrategy):
         ma_bearish = ema_val < sma_val
         
         # Volume trend
-        avg_volume = sum(volumes[-10:]) / 10 if len(volumes) >= 10 else sum(volumes) / len(volumes)
-        recent_volume = sum(volumes[-3:]) / 3 if len(volumes) >= 3 else volumes[-1]
-        volume_increasing = recent_volume > avg_volume
+        volume_stats = self.get_volume_stats(volumes, self.volume_lookback)
+        avg_volume = volume_stats["avg"]
+        current_volume = volume_stats["current"]
+        volume_ratio = volume_stats["ratio"]
+        recent_volume = sum(volumes[-3:]) / 3 if len(volumes) >= 3 else current_volume
+        volume_increasing = avg_volume and recent_volume > avg_volume * self.volume_increase_ratio
         
         signal = None
         confidence = 50.0
@@ -127,7 +132,8 @@ class RotationStrategy(BaseStrategy):
                 reasoning_parts.append("Volume building")
             
             if confidence >= self.min_confidence:
-                stop_loss = self.calculate_atr_stop(current_price, atr_val, self.atr_stop_mult, 'long')
+                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_loss = self.calculate_percent_stop(current_price, stop_pct, 'long')
                 take_profit = self.calculate_take_profit(current_price, stop_loss, 2.0, 'long')
                 
                 signal = Signal(
@@ -145,7 +151,7 @@ class RotationStrategy(BaseStrategy):
                         'performance': performance,
                         'vwap_distance': vwap_distance,
                         'vwap': vwap_val,
-                        'atr': atr_val,
+                        'volume_ratio': volume_ratio,
                         'rsi': rsi_val,
                         'regime': regime.value
                     }
@@ -176,7 +182,8 @@ class RotationStrategy(BaseStrategy):
                 reasoning_parts.append("Volume building")
             
             if confidence >= self.min_confidence:
-                stop_loss = self.calculate_atr_stop(current_price, atr_val, self.atr_stop_mult, 'short')
+                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_loss = self.calculate_percent_stop(current_price, stop_pct, 'short')
                 take_profit = self.calculate_take_profit(current_price, stop_loss, 2.0, 'short')
                 
                 signal = Signal(
@@ -194,7 +201,7 @@ class RotationStrategy(BaseStrategy):
                         'performance': performance,
                         'vwap_distance': vwap_distance,
                         'vwap': vwap_val,
-                        'atr': atr_val,
+                        'volume_ratio': volume_ratio,
                         'rsi': rsi_val,
                         'regime': regime.value
                     }
@@ -210,7 +217,9 @@ class RotationStrategy(BaseStrategy):
         base.update({
             'lookback_period': self.lookback_period,
             'rotation_threshold': self.rotation_threshold,
-            'atr_stop_mult': self.atr_stop_mult,
+            'volume_lookback': self.volume_lookback,
+            'volume_increase_ratio': self.volume_increase_ratio,
+            'volume_stop_pct': self.volume_stop_pct,
             'trailing_stop_pct': self.trailing_stop_pct
         })
         return base

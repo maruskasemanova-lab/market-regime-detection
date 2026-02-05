@@ -25,10 +25,12 @@ class PullbackStrategy(BaseStrategy):
         pullback_threshold_pct: float = 0.5,  # Tighter zone relative to slower MA
         ma_fast_period: int = 50,             # ~10 EMA on 5m chart
         ma_slow_period: int = 100,            # ~20 EMA on 5m chart
-        atr_stop_mult: float = 3.0,           # Wider stop for noise
-        rr_ratio: float = 1.5,                # Lower R:R target (high win rate focus)
-        min_confidence: float = 65.0,         # Standard confidence (was 70.0)
-        trailing_stop_pct: float = 1.0        # Looser trail
+        volume_lookback: int = 20,
+        volume_surge_ratio: float = 1.5,      # Increased from 1.2 for stronger signals
+        volume_stop_pct: float = 1.5,         # Wider stop (was 1.0)
+        rr_ratio: float = 2.0,                # Better R:R (was 1.5)
+        min_confidence: float = 65.0,         # Standard confidence
+        trailing_stop_pct: float = 1.2        # Wider trail (was 1.0)
     ):
         super().__init__(
             name="Pullback",
@@ -37,7 +39,9 @@ class PullbackStrategy(BaseStrategy):
         self.pullback_threshold_pct = pullback_threshold_pct
         self.ma_fast_period = ma_fast_period
         self.ma_slow_period = ma_slow_period
-        self.atr_stop_mult = atr_stop_mult
+        self.volume_lookback = volume_lookback
+        self.volume_surge_ratio = volume_surge_ratio
+        self.volume_stop_pct = volume_stop_pct
         self.rr_ratio = rr_ratio
         self.min_confidence = min_confidence
         self.trailing_stop_pct = trailing_stop_pct
@@ -63,17 +67,15 @@ class PullbackStrategy(BaseStrategy):
         ema_f = indicators.get('ema') or indicators.get('ema_fast')
         ema_s = indicators.get('ema_slow')
         vwap = indicators.get('vwap')
-        atr = indicators.get('atr')
         rsi = indicators.get('rsi')
         adx = indicators.get('adx')
         
-        if ema_f is None or ema_s is None or atr is None:
+        if ema_f is None or ema_s is None:
             return None
             
         ema_f = ema_f[-1] if isinstance(ema_f, list) else (ema_f or current_price)
         ema_s = ema_s[-1] if isinstance(ema_s, list) else (ema_s or current_price)
         vwap_val = vwap[-1] if isinstance(vwap, list) else (vwap or current_price)
-        atr_val = atr[-1] if isinstance(atr, list) else atr
         rsi_val = rsi[-1] if isinstance(rsi, list) else (rsi or 50)
         adx_val = adx[-1] if isinstance(adx, list) else (adx or 0)
         
@@ -87,8 +89,10 @@ class PullbackStrategy(BaseStrategy):
         if len(closes) < 20:
             return None
             
-        avg_volume = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else 0
-        current_volume = volumes[-1] if volumes else 0
+        volume_stats = self.get_volume_stats(volumes, self.volume_lookback)
+        avg_volume = volume_stats["avg"]
+        current_volume = volume_stats["current"]
+        volume_ratio = volume_stats["ratio"]
         
         signal = None
         confidence = 50.0
@@ -117,7 +121,7 @@ class PullbackStrategy(BaseStrategy):
                     # Quality Check: Strong close (upper half) OR Volume surge
                     midpoint = (highs[-1] + lows[-1]) / 2
                     is_strong_close = closes[-1] > midpoint
-                    is_volume_surge = current_volume > avg_volume * 1.2
+                    is_volume_surge = avg_volume and current_volume > avg_volume * self.volume_surge_ratio
                     
                     if is_strong_close or is_volume_surge:
                         confidence += 25
@@ -137,7 +141,7 @@ class PullbackStrategy(BaseStrategy):
                     if confidence >= self.min_confidence:
                         stop_loss = min(lows[-5:], default=current_price * 0.99)
                         # Ensure stop is not too far
-                        max_stop_dist = atr_val * self.atr_stop_mult
+                        max_stop_dist = current_price * (self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio) / 100)
                         if current_price - stop_loss > max_stop_dist:
                             stop_loss = current_price - max_stop_dist
                             
@@ -175,7 +179,7 @@ class PullbackStrategy(BaseStrategy):
                     # Quality Check: Weak close (lower half) OR Volume surge
                     midpoint = (highs[-1] + lows[-1]) / 2
                     is_weak_close = closes[-1] < midpoint
-                    is_volume_surge = current_volume > avg_volume * 1.2
+                    is_volume_surge = avg_volume and current_volume > avg_volume * self.volume_surge_ratio
                     
                     if is_weak_close or is_volume_surge:
                         confidence += 25
@@ -195,7 +199,7 @@ class PullbackStrategy(BaseStrategy):
                     if confidence >= self.min_confidence:
                         stop_loss = max(highs[-5:], default=current_price * 1.01)
                         # Ensure stop is not too far
-                        max_stop_dist = atr_val * self.atr_stop_mult
+                        max_stop_dist = current_price * (self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio) / 100)
                         if stop_loss - current_price > max_stop_dist:
                             stop_loss = current_price + max_stop_dist
 
@@ -223,3 +227,17 @@ class PullbackStrategy(BaseStrategy):
             self.add_signal(signal)
             
         return signal
+
+    def to_dict(self) -> Dict[str, Any]:
+        base = super().to_dict()
+        base.update({
+            'pullback_threshold_pct': self.pullback_threshold_pct,
+            'ma_fast_period': self.ma_fast_period,
+            'ma_slow_period': self.ma_slow_period,
+            'volume_lookback': self.volume_lookback,
+            'volume_surge_ratio': self.volume_surge_ratio,
+            'volume_stop_pct': self.volume_stop_pct,
+            'rr_ratio': self.rr_ratio,
+            'trailing_stop_pct': self.trailing_stop_pct
+        })
+        return base

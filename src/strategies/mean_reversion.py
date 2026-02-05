@@ -22,20 +22,24 @@ class MeanReversionStrategy(BaseStrategy):
     
     def __init__(
         self,
-        entry_deviation_pct: float = 0.3,    # Lowered from 1.2 for active scalping
-        atr_stop_mult: float = 2.0,          # Lowered from 3.0
-        min_confidence: float = 60.0,        # Higher bar (was 50)
+        entry_deviation_pct: float = 1.0,     # Increased from 0.3 - less false signals
+        min_confidence: float = 65.0,         # Higher bar for entries
         volume_confirmation: bool = True,
-        trailing_stop_pct: float = 0.3       # Very tight trail
+        volume_lookback: int = 20,
+        volume_exhaustion_ratio: float = 0.8, # Stricter exhaustion check
+        volume_stop_pct: float = 1.2,         # Wider stop (was 0.6)
+        trailing_stop_pct: float = 0.6        # Wider trail (was 0.3)
     ):
         super().__init__(
             name="MeanReversion",
             regimes=[Regime.CHOPPY, Regime.MIXED]
         )
         self.entry_deviation_pct = entry_deviation_pct
-        self.atr_stop_mult = atr_stop_mult
         self.min_confidence = min_confidence
         self.volume_confirmation = volume_confirmation
+        self.volume_lookback = volume_lookback
+        self.volume_exhaustion_ratio = volume_exhaustion_ratio
+        self.volume_stop_pct = volume_stop_pct
         self.trailing_stop_pct = trailing_stop_pct
         
     def generate_signal(
@@ -63,16 +67,14 @@ class MeanReversionStrategy(BaseStrategy):
         
         # Get indicators
         vwap = indicators.get('vwap')
-        atr = indicators.get('atr')
         rsi = indicators.get('rsi')
         adx = indicators.get('adx')
         
-        if vwap is None or atr is None:
+        if vwap is None:
             return None
             
         # Get latest values
         vwap_val = vwap[-1] if isinstance(vwap, list) else vwap
-        atr_val = atr[-1] if isinstance(atr, list) else atr
         rsi_val = rsi[-1] if isinstance(rsi, list) else (rsi or 50)
         adx_val = adx[-1] if isinstance(adx, list) else (adx or 0)
         
@@ -92,21 +94,18 @@ class MeanReversionStrategy(BaseStrategy):
         
         # Calculate volume metrics
         volumes = ohlcv.get('volume', [])
-        if len(volumes) >= 20:
-            avg_volume = sum(volumes[-20:]) / 20
-            current_volume = volumes[-1]
-        else:
-            avg_volume = sum(volumes) / len(volumes) if volumes else 0
-            current_volume = volumes[-1] if volumes else 0
+        volume_stats = self.get_volume_stats(volumes, self.volume_lookback)
+        avg_volume = volume_stats["avg"]
+        current_volume = volume_stats["current"]
+        volume_ratio = volume_stats["ratio"]
         
         signal = None
         confidence = 50.0
         reasoning_parts = []
         
         # Filter: Ensure market is not strongly trending against us
-        # In TRENDING regime, we allow high ADX (that's the point of fading the extreme)
-        # But we must be very careful.
-        if regime != Regime.TRENDING and adx_val > 30:
+        # Lowered from 30 to 25 for more trade opportunities
+        if regime != Regime.TRENDING and adx_val > 25:
             return None
         
         # LONG SIGNAL: Price below VWAP (oversold)
@@ -128,7 +127,7 @@ class MeanReversionStrategy(BaseStrategy):
                 reasoning_parts.append(f"Deviation from VWAP ({vwap_distance_pct:.2f}%)")
             
             # Volume check - want declining volume at extreme
-            if current_volume < avg_volume:
+            if self.volume_confirmation and avg_volume and current_volume < avg_volume * self.volume_exhaustion_ratio:
                 confidence += 10
                 reasoning_parts.append("Declining volume (exhaustion)")
             
@@ -138,7 +137,8 @@ class MeanReversionStrategy(BaseStrategy):
                 reasoning_parts.append("CHOPPY regime favors mean reversion")
             
             if confidence >= self.min_confidence:
-                stop_loss = self.calculate_atr_stop(current_price, atr_val, self.atr_stop_mult, 'long')
+                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_loss = self.calculate_percent_stop(current_price, stop_pct, 'long')
                 take_profit = vwap_val  # Target VWAP
                 
                 signal = Signal(
@@ -155,7 +155,7 @@ class MeanReversionStrategy(BaseStrategy):
                     metadata={
                         'vwap': vwap_val,
                         'vwap_distance_pct': vwap_distance_pct,
-                        'atr': atr_val,
+                        'volume_ratio': volume_ratio,
                         'rsi': rsi_val,
                         'regime': regime.value,
                         'adx': adx_val
@@ -182,7 +182,7 @@ class MeanReversionStrategy(BaseStrategy):
                 reasoning_parts.append(f"Deviation from VWAP ({vwap_distance_pct:.2f}%)")
             
             # Volume check
-            if current_volume < avg_volume:
+            if self.volume_confirmation and avg_volume and current_volume < avg_volume * self.volume_exhaustion_ratio:
                 confidence += 10
                 reasoning_parts.append("Declining volume (exhaustion)")
             
@@ -191,7 +191,8 @@ class MeanReversionStrategy(BaseStrategy):
                 reasoning_parts.append("CHOPPY regime favors mean reversion")
             
             if confidence >= self.min_confidence:
-                stop_loss = self.calculate_atr_stop(current_price, atr_val, self.atr_stop_mult, 'short')
+                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_loss = self.calculate_percent_stop(current_price, stop_pct, 'short')
                 take_profit = vwap_val  # Target VWAP
                 
                 signal = Signal(
@@ -208,7 +209,7 @@ class MeanReversionStrategy(BaseStrategy):
                     metadata={
                         'vwap': vwap_val,
                         'vwap_distance_pct': vwap_distance_pct,
-                        'atr': atr_val,
+                        'volume_ratio': volume_ratio,
                         'rsi': rsi_val,
                         'regime': regime.value,
                         'adx': adx_val
@@ -224,8 +225,11 @@ class MeanReversionStrategy(BaseStrategy):
         base = super().to_dict()
         base.update({
             'entry_deviation_pct': self.entry_deviation_pct,
-            'atr_stop_mult': self.atr_stop_mult,
             'min_confidence': self.min_confidence,
+            'volume_confirmation': self.volume_confirmation,
+            'volume_lookback': self.volume_lookback,
+            'volume_exhaustion_ratio': self.volume_exhaustion_ratio,
+            'volume_stop_pct': self.volume_stop_pct,
             'trailing_stop_pct': self.trailing_stop_pct
         })
         return base

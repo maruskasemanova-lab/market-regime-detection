@@ -13,6 +13,8 @@ from .strategies.pullback import PullbackStrategy
 from .strategies.momentum import MomentumStrategy
 from .strategies.rotation import RotationStrategy
 from .strategies.vwap_magnet import VWAPMagnetStrategy
+from .strategies.volume_profile import VolumeProfileStrategy
+from .strategies.gap_liquidity import GapLiquidityStrategy
 
 
 @dataclass
@@ -60,7 +62,9 @@ class StrategyEngine:
             'pullback': PullbackStrategy(),
             'momentum': MomentumStrategy(),
             'rotation': RotationStrategy(),
-            'vwap_magnet': VWAPMagnetStrategy()
+            'vwap_magnet': VWAPMagnetStrategy(),
+            'volume_profile': VolumeProfileStrategy(),
+            'gap_liquidity': GapLiquidityStrategy()
         }
         
         # Trailing stop manager

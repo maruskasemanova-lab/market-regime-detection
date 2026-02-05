@@ -416,6 +416,45 @@ async def clear_session(run_id: str, ticker: str, date: str):
     return {"message": "Session cleared", "run_id": run_id, "ticker": ticker, "date": date}
 
 
+class TradingConfig(BaseModel):
+    """Global trading configuration."""
+    regime_detection_minutes: int = 60
+    max_daily_loss: float = 300.0
+    max_trades_per_day: int = 3
+    trade_cooldown_bars: int = 15
+    account_size_usd: float = 10000.0
+
+
+@app.get("/api/config/trading")
+async def get_trading_config():
+    """Get current global trading configuration."""
+    return {
+        "regime_detection_minutes": day_trading_manager.regime_detection_minutes,
+        "max_daily_loss": day_trading_manager.max_daily_loss,
+        "max_trades_per_day": day_trading_manager.max_trades_per_day,
+        "trade_cooldown_bars": day_trading_manager.trade_cooldown_bars,
+    }
+
+
+@app.post("/api/config/trading")
+async def update_trading_config(config: TradingConfig):
+    """Update global trading configuration."""
+    day_trading_manager.regime_detection_minutes = config.regime_detection_minutes
+    day_trading_manager.max_daily_loss = config.max_daily_loss
+    day_trading_manager.max_trades_per_day = config.max_trades_per_day
+    day_trading_manager.trade_cooldown_bars = config.trade_cooldown_bars
+    
+    return {
+        "message": "Trading configuration updated",
+        "config": {
+            "regime_detection_minutes": config.regime_detection_minutes,
+            "max_daily_loss": config.max_daily_loss,
+            "max_trades_per_day": config.max_trades_per_day,
+            "trade_cooldown_bars": config.trade_cooldown_bars,
+        }
+    }
+
+
 @app.post("/api/session/config")
 async def configure_session(
     run_id: str,

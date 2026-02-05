@@ -200,6 +200,28 @@ class BaseStrategy(ABC):
     def check_volume_confirmation(self, current_volume: float, avg_volume: float, threshold: float = 1.5) -> bool:
         """Check if volume confirms the move."""
         return current_volume >= avg_volume * threshold
+
+    def get_volume_stats(self, volumes: List[float], lookback: int = 20) -> Dict[str, float]:
+        """Return current, average, and ratio for volume."""
+        if not volumes:
+            return {"current": 0.0, "avg": 0.0, "ratio": 0.0}
+        window = min(lookback, len(volumes))
+        avg_volume = sum(volumes[-window:]) / window if window else 0.0
+        current_volume = volumes[-1] if volumes else 0.0
+        ratio = (current_volume / avg_volume) if avg_volume else 0.0
+        return {"current": current_volume, "avg": avg_volume, "ratio": ratio}
+
+    def volume_adjusted_pct(
+        self,
+        base_pct: float,
+        volume_ratio: float,
+        min_ratio: float = 0.5,
+        max_ratio: float = 3.0
+    ) -> float:
+        """Scale percent by volume ratio (higher volume -> tighter stops)."""
+        ratio = volume_ratio if volume_ratio > 0 else 1.0
+        ratio = max(min(ratio, max_ratio), min_ratio)
+        return base_pct / ratio
     
     def add_signal(self, signal: Signal):
         """Add signal to history."""

@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional
 from enum import Enum
 import json
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,8 @@ from .strategies.pullback import PullbackStrategy
 from .strategies.momentum import MomentumStrategy
 from .strategies.rotation import RotationStrategy
 from .strategies.vwap_magnet import VWAPMagnetStrategy
+from .strategies.volume_profile import VolumeProfileStrategy
+from .strategies.gap_liquidity import GapLiquidityStrategy
 
 
 class SessionPhase(Enum):
@@ -232,21 +235,21 @@ class DayTradingManager:
     
     def __init__(
         self,
-        regime_detection_minutes: int = 5,
+        regime_detection_minutes: int = 30,
         trading_costs: TradingCosts = None,
         max_daily_loss: float = 300.0,
         max_trades_per_day: int = 3,
+        trade_cooldown_bars: int = 15,  # Cooldown between trades in bars
     ):
         self.sessions: Dict[str, TradingSession] = {}  # session_key -> TradingSession
         self.regime_detection_minutes = regime_detection_minutes
         self.trading_costs = trading_costs or TradingCosts()
-        self.max_daily_loss = max_daily_loss # Stop trading if loss exceeds this amount
+        self.max_daily_loss = max_daily_loss  # Stop trading if loss exceeds this amount
         self.max_trades_per_day = max_trades_per_day  # Limit trades to reduce fees
+        self.trade_cooldown_bars = trade_cooldown_bars  # Cooldown between trades
         self.market_tz = ZoneInfo("America/New_York")
         self.run_defaults: Dict[tuple, Dict[str, Any]] = {}
         
-        # Cooldown between trades (in bars, assuming 1-min bars)
-        self.trade_cooldown_bars = 15  # 15 minutes between trades
         self.last_trade_bar_index = {}  # Track last trade bar per session
         
         # Pre-configured strategies
@@ -255,36 +258,203 @@ class DayTradingManager:
             'pullback': PullbackStrategy(),
             'momentum': MomentumStrategy(),
             'rotation': RotationStrategy(),
-            'vwap_magnet': VWAPMagnetStrategy()
+            'vwap_magnet': VWAPMagnetStrategy(),
+            'volume_profile': VolumeProfileStrategy(),
+            'gap_liquidity': GapLiquidityStrategy()
         }
         
         # Strategy selection by regime
-        # Default Preferences
+        # Default Preferences - including new volume-focused strategies
         self.default_preference = {
-            Regime.TRENDING: ['momentum', 'pullback', 'vwap_magnet', 'mean_reversion'],
-            Regime.CHOPPY: ['mean_reversion', 'vwap_magnet'],
-            Regime.MIXED: ['mean_reversion', 'vwap_magnet', 'rotation']
+            Regime.TRENDING: ['momentum', 'pullback', 'gap_liquidity', 'volume_profile', 'vwap_magnet'],
+            Regime.CHOPPY: ['mean_reversion', 'vwap_magnet', 'volume_profile'],
+            Regime.MIXED: ['volume_profile', 'gap_liquidity', 'mean_reversion', 'vwap_magnet', 'rotation']
         }
         
-        # Ticker-Specific Preferences
+        # Ticker-Specific Preferences (AOS Optimized)
         self.ticker_preferences = {
             "NVDA": {
-                Regime.TRENDING: ['pullback', 'momentum', 'vwap_magnet', 'mean_reversion'],
-                Regime.CHOPPY: [], # NVDA loses in Chop, better to stay out
-                Regime.MIXED: ['vwap_magnet', 'mean_reversion', 'rotation'] # NVDA likes Magnet
+                Regime.TRENDING: ['pullback', 'momentum', 'volume_profile'],
+                Regime.CHOPPY: [],  # Skip choppy - losses historically
+                Regime.MIXED: ['volume_profile', 'vwap_magnet']
             },
             "TSLA": {
-                Regime.TRENDING: ['momentum', 'pullback'], # Momentum (-$164) beat Pullback (-$311) and Magnet (-$180) on Jan 26
-                Regime.CHOPPY: [], # MeanReversion lost -$776 Jan 20-28, stay out
-                Regime.MIXED: ['mean_reversion'] # No VWAPMagnet for TSLA
+                Regime.TRENDING: ['momentum', 'gap_liquidity'],
+                Regime.CHOPPY: [],  # Skip choppy - high volatility losses
+                Regime.MIXED: []  # Only trade clear trends
+            },
+            "AAPL": {
+                Regime.TRENDING: ['mean_reversion', 'vwap_magnet', 'pullback'],
+                Regime.CHOPPY: ['mean_reversion', 'vwap_magnet'],
+                Regime.MIXED: ['mean_reversion', 'vwap_magnet']
+            },
+            "AMD": {
+                Regime.TRENDING: ['momentum', 'volume_profile', 'pullback'],
+                Regime.CHOPPY: [],  # Skip choppy
+                Regime.MIXED: ['volume_profile', 'vwap_magnet']
+            },
+            "GOOGL": {
+                Regime.TRENDING: ['mean_reversion', 'vwap_magnet'],
+                Regime.CHOPPY: ['mean_reversion', 'vwap_magnet'],
+                Regime.MIXED: ['mean_reversion', 'vwap_magnet']
+            },
+            "META": {
+                Regime.TRENDING: ['pullback', 'vwap_magnet', 'volume_profile'],
+                Regime.CHOPPY: ['mean_reversion'],
+                Regime.MIXED: ['pullback', 'vwap_magnet']
+            },
+            "MSFT": {
+                Regime.TRENDING: ['mean_reversion', 'vwap_magnet'],
+                Regime.CHOPPY: ['mean_reversion', 'vwap_magnet'],
+                Regime.MIXED: ['mean_reversion', 'vwap_magnet']
+            },
+            "MU": {
+                Regime.TRENDING: ['momentum', 'gap_liquidity', 'volume_profile'],
+                Regime.CHOPPY: [],  # Skip choppy
+                Regime.MIXED: ['volume_profile']
+            },
+            "AMZN": {
+                Regime.TRENDING: ['pullback', 'mean_reversion', 'vwap_magnet'],
+                Regime.CHOPPY: ['mean_reversion'],
+                Regime.MIXED: ['pullback', 'mean_reversion']
             }
         }
+        
+        # AOS ticker-specific parameters (will be loaded from config)
+        self.ticker_params = {}
+        
+        # Try to load AOS config
+        self._load_aos_config()
+    
+    def _load_aos_config(self, config_path: str = None):
+        """Load AOS configuration from file if available."""
+        import os
+        
+        # Try default paths
+        if config_path is None:
+            possible_paths = [
+                '/Users/hotovo/.gemini/antigravity/scratch/backtest-runner/aos_optimization/aos_config.json',
+                'aos_optimization/aos_config.json',
+                '../backtest-runner/aos_optimization/aos_config.json'
+            ]
+            for path in possible_paths:
+                if os.path.exists(path):
+                    config_path = path
+                    break
+        
+        if config_path and os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                
+                # Load ticker-specific parameters (do not mutate global strategy
+                # instances per ticker; apply overrides at signal generation time).
+                for ticker, ticker_config in config.get('tickers', {}).items():
+                    ticker_key = str(ticker).upper()
+                    primary_strategy = self._canonical_strategy_key(ticker_config.get('strategy', ''))
+                    backup_strategy = self._canonical_strategy_key(ticker_config.get('backup_strategy', ''))
+                    self.ticker_params[ticker_key] = {
+                        'strategy': primary_strategy,
+                        'backup_strategy': backup_strategy,
+                        'params': ticker_config.get('params', {}),
+                        'regime_filter': ticker_config.get('regime_filter', []),
+                        'avoid_days': ticker_config.get('avoid_days', []),
+                        'trading_hours': ticker_config.get('trading_hours', None),  # Time-based filter
+                        'long_only': ticker_config.get('long_only', False),
+                        'time_filter_enabled': ticker_config.get('time_filter_enabled', True),
+                        'min_confidence': ticker_config.get('min_confidence', 65.0),
+                        'max_daily_trades': ticker_config.get('max_daily_trades', 2)
+                    }
+                
+                logger.info(f"Loaded AOS config from {config_path}")
+            except Exception as e:
+                logger.warning(f"Could not load AOS config: {e}")
         
     def _to_market_time(self, ts: datetime) -> datetime:
         """Convert timestamp to US/Eastern for market-hour comparisons."""
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=ZoneInfo("UTC"))
         return ts.astimezone(self.market_tz)
+
+    def _canonical_strategy_key(self, strategy_name: str) -> str:
+        """Normalize strategy name to one of self.strategies keys."""
+        if not strategy_name:
+            return ""
+
+        normalized = strategy_name.strip().replace("-", "_").replace(" ", "_")
+        lowered = normalized.lower()
+        if lowered in self.strategies:
+            return lowered
+
+        snake = re.sub(r'(?<!^)(?=[A-Z])', '_', normalized).lower()
+        snake = re.sub(r'__+', '_', snake)
+        if snake in self.strategies:
+            return snake
+
+        compact = re.sub(r'[^a-z0-9]', '', lowered)
+        for key in self.strategies.keys():
+            if key.replace('_', '') == compact:
+                return key
+
+        return snake
+
+    def _is_day_allowed(self, date_str: str, ticker: str) -> bool:
+        """Check if trading day is allowed by ticker-specific avoid_days."""
+        ticker_cfg = self.ticker_params.get(str(ticker).upper(), {})
+        avoid_days = {str(day).strip().lower() for day in ticker_cfg.get("avoid_days", [])}
+        if not avoid_days:
+            return True
+
+        try:
+            weekday = datetime.strptime(date_str, "%Y-%m-%d").strftime("%A").lower()
+            return weekday not in avoid_days
+        except Exception:
+            return True
+
+    def _get_ticker_strategy_overrides(self, ticker: str, strategy_key: str) -> Dict[str, Any]:
+        """Get per-ticker parameter overrides for a strategy."""
+        ticker_cfg = self.ticker_params.get(str(ticker).upper(), {})
+        if ticker_cfg.get("strategy") == strategy_key:
+            return ticker_cfg.get("params", {}) or {}
+        return {}
+
+    def _generate_signal_with_overrides(
+        self,
+        strategy: BaseStrategy,
+        overrides: Dict[str, Any],
+        current_price: float,
+        ohlcv: Dict[str, List[float]],
+        indicators: Dict[str, Any],
+        regime: Regime,
+        timestamp: datetime
+    ) -> Optional[Signal]:
+        """Generate a signal with temporary attribute overrides."""
+        if not overrides:
+            return strategy.generate_signal(
+                current_price=current_price,
+                ohlcv=ohlcv,
+                indicators=indicators,
+                regime=regime,
+                timestamp=timestamp
+            )
+
+        original_values = {}
+        for key, value in overrides.items():
+            if hasattr(strategy, key):
+                original_values[key] = getattr(strategy, key)
+                setattr(strategy, key, value)
+
+        try:
+            return strategy.generate_signal(
+                current_price=current_price,
+                ohlcv=ohlcv,
+                indicators=indicators,
+                regime=regime,
+                timestamp=timestamp
+            )
+        finally:
+            for key, value in original_values.items():
+                setattr(strategy, key, value)
 
     def _get_session_key(self, run_id: str, ticker: str, date: str) -> str:
         """Generate unique session key."""
@@ -311,6 +481,8 @@ class DayTradingManager:
             # Rule: No Fridays (Day 4)
             # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
             if datetime.strptime(date, "%Y-%m-%d").weekday() == 4:
+                self.sessions[key].phase = SessionPhase.CLOSED
+            elif not self._is_day_allowed(date, ticker):
                 self.sessions[key].phase = SessionPhase.CLOSED
         
         return self.sessions[key]
@@ -438,13 +610,16 @@ class DayTradingManager:
                 # Select BEST strategies for this regime
                 active_strategies = self._select_strategies(session)
                 session.active_strategies = active_strategies
-                session.selected_strategy = active_strategies[0] if active_strategies else None
+                session.selected_strategy = (
+                    "adaptive" if len(active_strategies) > 1 else (active_strategies[0] if active_strategies else None)
+                )
                 
                 # Transition to trading
                 session.phase = SessionPhase.TRADING
                 result['action'] = 'regime_detected'
                 result['regime'] = regime.value
                 result['strategies'] = active_strategies
+                result['strategy'] = session.selected_strategy
                 # print(f"DEBUG: Regime DETECTED {regime} at {timestamp}. Strategy: {active_strategies[0]}", flush=True)
                 
                 # Include indicator values for frontend decision markers
@@ -549,17 +724,40 @@ class DayTradingManager:
     def _select_strategies(self, session: TradingSession) -> List[str]:
         """Select active strategies for the detected regime and ticker."""
         regime = session.detected_regime or Regime.MIXED
-        ticker = session.ticker
-        
-        # Get preferences for this ticker, or default
-        prefs = self.ticker_preferences.get(ticker, self.default_preference)
-        
-        # Preferred list for this regime
-        preferred = prefs.get(regime, ['mean_reversion'])
+        ticker = session.ticker.upper()
+        ticker_cfg = self.ticker_params.get(ticker.upper(), {})
 
-        # Filter preferred list by enabled + allowed_regimes
-        filtered = []
-        for name in preferred:
+        # Optional AOS regime filter: if the regime is explicitly disallowed, skip trading.
+        allowed_regimes_cfg = {
+            str(r).strip().upper()
+            for r in ticker_cfg.get("regime_filter", [])
+            if str(r).strip()
+        }
+        if allowed_regimes_cfg and regime.value not in allowed_regimes_cfg:
+            return []
+
+        # Build ordered candidates:
+        # 1) AOS primary/backup strategy
+        # 2) Ticker defaults for this regime
+        # 3) Global defaults for this regime
+        candidates: List[str] = []
+        primary = ticker_cfg.get("strategy")
+        backup = ticker_cfg.get("backup_strategy")
+        if primary:
+            candidates.append(primary)
+        if backup:
+            candidates.append(backup)
+
+        ticker_prefs = self.ticker_preferences.get(ticker, {})
+        candidates.extend(ticker_prefs.get(regime, []))
+        candidates.extend(self.default_preference.get(regime, []))
+
+        filtered: List[str] = []
+        seen = set()
+        for raw_name in candidates:
+            name = self._canonical_strategy_key(raw_name)
+            if not name or name in seen:
+                continue
             strat = self.strategies.get(name)
             if not strat:
                 continue
@@ -567,16 +765,19 @@ class DayTradingManager:
                 continue
             if hasattr(strat, "allowed_regimes") and regime not in strat.allowed_regimes:
                 continue
+            seen.add(name)
             filtered.append(name)
 
-        # Fallback: any enabled strategy that supports this regime
+        # Fallback: any enabled strategy that supports this regime.
         if not filtered:
             for name, strat in self.strategies.items():
-                if getattr(strat, "enabled", True) and regime in getattr(strat, "allowed_regimes", [regime]):
-                    filtered.append(name)
+                if not getattr(strat, "enabled", True):
+                    continue
+                if regime not in getattr(strat, "allowed_regimes", [regime]):
+                    continue
+                filtered.append(name)
 
-        # Return only the top choice to keep behaviour deterministic
-        return filtered[:1]
+        return filtered[:3]
     
     def _calc_trend_efficiency(self, bars: List[BarData]) -> float:
         """Calculate trend efficiency (net move / total move)."""
@@ -678,6 +879,112 @@ class DayTradingManager:
                 adx_values.append(adx)
                 
         return round(adx_values[-1], 2) if adx_values else 0.0
+    
+    def _calc_adx_series(self, bars: List[BarData], period: int = 14) -> List[float]:
+        """Calculate ADX series incrementally (point-in-time, no look-ahead bias).
+        
+        Returns a list of ADX values, one for each bar, where each value
+        only uses data up to that point in time.
+        """
+        if len(bars) < 2:
+            return [0.0] * len(bars)
+            
+        highs = [b.high for b in bars]
+        lows = [b.low for b in bars]
+        closes = [b.close for b in bars]
+        
+        # Pre-fill with zeros for bars that don't have enough data
+        adx_series = [0.0] * len(bars)
+        
+        tr_list = []
+        dm_plus_list = []
+        dm_minus_list = []
+        
+        # First bar has no ADX
+        for i in range(1, len(bars)):
+            # True Range
+            hl = highs[i] - lows[i]
+            hc = abs(highs[i] - closes[i-1])
+            lc = abs(lows[i] - closes[i-1])
+            tr = max(hl, hc, lc)
+            tr_list.append(tr)
+            
+            # Directional Movement
+            up_move = highs[i] - highs[i-1]
+            down_move = lows[i-1] - lows[i]
+            
+            if up_move > down_move and up_move > 0:
+                dm_plus_list.append(up_move)
+            else:
+                dm_plus_list.append(0.0)
+                
+            if down_move > up_move and down_move > 0:
+                dm_minus_list.append(down_move)
+            else:
+                dm_minus_list.append(0.0)
+            
+            # Need at least period bars of TR data
+            if len(tr_list) < period:
+                continue
+            
+            # Calculate ADX at this point using data up to bar i
+            if len(tr_list) == period:
+                # Initial smoothed averages
+                tr_smooth = sum(tr_list[:period])
+                dm_plus_smooth = sum(dm_plus_list[:period])
+                dm_minus_smooth = sum(dm_minus_list[:period])
+                
+                if tr_smooth > 0:
+                    di_plus = 100 * (dm_plus_smooth / tr_smooth)
+                    di_minus = 100 * (dm_minus_smooth / tr_smooth)
+                else:
+                    di_plus = 0.0
+                    di_minus = 0.0
+                
+                if di_plus + di_minus > 0:
+                    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+                else:
+                    dx = 0.0
+                
+                adx_series[i] = round(dx, 2)
+            else:
+                # Wilder's smoothing
+                j = len(tr_list) - 1  # Current index in tr_list
+                start_idx = j - period
+                
+                # Calculate smoothed values up to this point
+                tr_smooth = sum(tr_list[start_idx:start_idx + period])
+                dm_plus_smooth = sum(dm_plus_list[start_idx:start_idx + period])
+                dm_minus_smooth = sum(dm_minus_list[start_idx:start_idx + period])
+                
+                # Apply Wilder's smoothing for remaining bars
+                for k in range(start_idx + period, j + 1):
+                    tr_smooth = tr_smooth - (tr_smooth / period) + tr_list[k]
+                    dm_plus_smooth = dm_plus_smooth - (dm_plus_smooth / period) + dm_plus_list[k]
+                    dm_minus_smooth = dm_minus_smooth - (dm_minus_smooth / period) + dm_minus_list[k]
+                
+                if tr_smooth > 0:
+                    di_plus = 100 * (dm_plus_smooth / tr_smooth)
+                    di_minus = 100 * (dm_minus_smooth / tr_smooth)
+                else:
+                    di_plus = 0.0
+                    di_minus = 0.0
+                
+                if di_plus + di_minus > 0:
+                    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+                else:
+                    dx = 0.0
+                
+                # Use previous ADX for smoothing
+                prev_adx = adx_series[i - 1]
+                if prev_adx > 0:
+                    adx = (prev_adx * (period - 1) + dx) / period
+                else:
+                    adx = dx
+                
+                adx_series[i] = round(adx, 2)
+        
+        return adx_series
     
     def _process_trading_bar(
         self, 
@@ -802,6 +1109,19 @@ class DayTradingManager:
                 result['reason'] = f'Cooldown: {self.trade_cooldown_bars - bars_since_last_trade} bars remaining'
                 return result
             
+            # Optional ticker-specific time filter from AOS config.
+            bar_time = self._to_market_time(timestamp).time()
+            bar_hour = bar_time.hour
+            
+            ticker_aos_config = self.ticker_params.get(session.ticker.upper(), {})
+            trading_hours = ticker_aos_config.get('trading_hours', None)
+
+            if trading_hours and ticker_aos_config.get("time_filter_enabled", True):
+                if bar_hour not in trading_hours:
+                    result['action'] = 'time_filter'
+                    result['reason'] = f'Hour {bar_hour}:00 not in allowed hours {trading_hours}'
+                    return result
+            
             signal = self._generate_signal(session, bar, timestamp)
             
             if signal:
@@ -861,15 +1181,18 @@ class DayTradingManager:
         regime = session.detected_regime or Regime.MIXED
 
         candidate_signals = []
+        ticker_cfg = self.ticker_params.get(session.ticker.upper(), {})
+        is_long_only = bool(ticker_cfg.get("long_only", False))
 
         for strategy_name in active_strategies:
             if strategy_name not in self.strategies:
                 continue
             
             strategy = self.strategies[strategy_name]
-            
-            # Generate signal
-            signal = strategy.generate_signal(
+
+            signal = self._generate_signal_with_overrides(
+                strategy=strategy,
+                overrides=self._get_ticker_strategy_overrides(session.ticker, strategy_name),
                 current_price=bar.close,
                 ohlcv=ohlcv,
                 indicators=indicators,
@@ -878,15 +1201,34 @@ class DayTradingManager:
             )
             
             if signal:
+                if is_long_only and signal.signal_type == SignalType.SELL:
+                    continue
                 candidate_signals.append(signal)
         
         if not candidate_signals:
             return None
             
-        # Select best signal based on confidence
-        # Tie-break: Prefer Momentum in Trend, MeanRev in Chop
-        candidate_signals.sort(key=lambda s: s.confidence, reverse=True)
-        best_signal = candidate_signals[0]
+        # Select best signal using confidence + strategy preference + recent edge.
+        rank = {name: idx for idx, name in enumerate(active_strategies)}
+
+        strategy_trade_history: Dict[str, List[float]] = {}
+        for trade in session.trades:
+            trade_key = self._canonical_strategy_key(trade.strategy)
+            strategy_trade_history.setdefault(trade_key, []).append(trade.gross_pnl_pct)
+
+        scored = []
+        for sig in candidate_signals:
+            key = self._canonical_strategy_key(sig.strategy_name)
+            preference_bonus = max(0.0, 6.0 - (rank.get(key, 99) * 3.0))
+            recent = strategy_trade_history.get(key, [])[-3:]
+            perf_bonus = 0.0
+            if recent:
+                perf_bonus = max(-8.0, min(8.0, (sum(recent) / len(recent)) * 2.0))
+
+            score = float(sig.confidence) + preference_bonus + perf_bonus
+            scored.append((score, sig))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        best_signal = scored[0][1]
         
         return best_signal
     
@@ -982,10 +1324,9 @@ class DayTradingManager:
                 vwap.append(cum_pv / cum_vol if cum_vol > 0 else typical_price)
             indicators['vwap'] = vwap
         
-        # Calculate ADX series for indicators
-        adx_val = self._calc_adx(bars, 14)
-        # Populate full series with final value for simplicity
-        indicators['adx'] = [adx_val] * len(closes)
+        # Calculate ADX series incrementally (point-in-time, no look-ahead)
+        adx_series = self._calc_adx_series(bars, 14)
+        indicators['adx'] = adx_series if adx_series else [0.0] * len(closes)
         
         return indicators
     

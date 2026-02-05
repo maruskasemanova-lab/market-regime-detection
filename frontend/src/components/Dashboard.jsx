@@ -6,6 +6,7 @@ import SignalsTable from './SignalsTable';
 import TradesHistory from './TradesHistory';
 import PositionsList from './PositionsList';
 import PerformanceStats from './PerformanceStats';
+import StrategyConfigPanel from './StrategyConfigPanel';
 
 function Dashboard() {
   const {
@@ -23,6 +24,9 @@ function Dashboard() {
     runBacktest,
     resetEngine,
     toggleStrategy,
+    updateStrategy,
+    fetchTradingConfig,
+    updateTradingConfig,
   } = useBackendApi();
 
   const [regime, setRegime] = useState(null);
@@ -33,10 +37,12 @@ function Dashboard() {
   const [currentPrice, setCurrentPrice] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
   const [stepResult, setStepResult] = useState(null);
+  const [tradingConfig, setTradingConfig] = useState(null);
+  const [showConfig, setShowConfig] = useState(false);
 
   // Fetch all data
   const refreshData = async () => {
-    const [regimeData, signalsData, tradesData, positionsData, perfData, currentData] = 
+    const [regimeData, signalsData, tradesData, positionsData, perfData, currentData, configData] = 
       await Promise.all([
         fetchRegime(),
         fetchSignals(),
@@ -44,6 +50,7 @@ function Dashboard() {
         fetchPositions(),
         fetchPerformance(),
         fetchCurrent(),
+        fetchTradingConfig(),
       ]);
     
     if (regimeData) setRegime(regimeData);
@@ -52,6 +59,7 @@ function Dashboard() {
     if (positionsData) setPositions(positionsData.open_positions || {});
     if (perfData) setPerformance(perfData);
     if (currentData) setCurrentPrice(currentData);
+    if (configData) setTradingConfig(configData);
   };
 
   useEffect(() => {
@@ -176,6 +184,25 @@ function Dashboard() {
 
         {/* Open Positions */}
         <PositionsList positions={positions} />
+        
+        {/* Config Toggle */}
+        <button 
+          className="btn btn-secondary" 
+          onClick={() => setShowConfig(!showConfig)}
+          style={{ marginTop: '0.5rem' }}
+        >
+          {showConfig ? '✕ Hide Config' : '⚙️ Show Config'}
+        </button>
+        
+        {/* Strategy Config Panel */}
+        {showConfig && (
+          <StrategyConfigPanel 
+            strategies={state?.strategies}
+            tradingConfig={tradingConfig}
+            onUpdateStrategy={updateStrategy}
+            onUpdateTradingConfig={updateTradingConfig}
+          />
+        )}
       </div>
 
       {/* Main Panel */}

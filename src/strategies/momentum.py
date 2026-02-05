@@ -24,21 +24,25 @@ class MomentumStrategy(BaseStrategy):
     def __init__(
         self,
         consolidation_bars: int = 10,         # 10 minute consolidation (standard flag)
-        breakout_atr_mult: float = 0.3,       # Earlier entry (was 0.5)
-        volume_threshold: float = 1.5,        # 1.5x Volume surge needed (was 1.2)
-        atr_stop_mult: float = 2.0,           # Tighter risk (was 3.0)
+        volume_threshold: float = 1.8,        # Increased from 1.5 - stricter volume confirmation
+        volume_lookback: int = 20,
+        consolidation_range_pct: float = 0.6, # % of price to qualify as tight range
+        breakout_pct: float = 0.2,            # Increased buffer for breakout confirmation
+        volume_stop_pct: float = 1.2,         # Wider stop (was 0.8)
         rr_ratio: float = 2.5,                # Good R:R
         min_confidence: float = 70.0,         # High bar
-        trailing_stop_pct: float = 1.5        # Widen trail to catch runners (was 0.8)
+        trailing_stop_pct: float = 1.5        # Widen trail to catch runners
     ):
         super().__init__(
             name="Momentum",
             regimes=[Regime.TRENDING]
         )
         self.consolidation_bars = consolidation_bars
-        self.breakout_atr_mult = breakout_atr_mult
         self.volume_threshold = volume_threshold
-        self.atr_stop_mult = atr_stop_mult
+        self.volume_lookback = volume_lookback
+        self.consolidation_range_pct = consolidation_range_pct
+        self.breakout_pct = breakout_pct
+        self.volume_stop_pct = volume_stop_pct
         self.rr_ratio = rr_ratio
         self.min_confidence = min_confidence
         self.trailing_stop_pct = trailing_stop_pct
@@ -66,16 +70,11 @@ class MomentumStrategy(BaseStrategy):
             return None
         
         # Get indicators
-        atr = indicators.get('atr')
         rsi = indicators.get('rsi')
         vwap = indicators.get('vwap')
         ema = indicators.get('ema') or indicators.get('ema_fast')
         adx = indicators.get('adx')
         
-        if atr is None:
-            return None
-            
-        atr_val = atr[-1] if isinstance(atr, list) else atr
         rsi_val = rsi[-1] if isinstance(rsi, list) else (rsi or 50)
         vwap_val = vwap[-1] if isinstance(vwap, list) else (vwap or current_price)
         ema_val = ema[-1] if isinstance(ema, list) else (ema or current_price)
@@ -99,15 +98,17 @@ class MomentumStrategy(BaseStrategy):
         consol_range = consol_high - consol_low
         
         # Check if range is "tight" (consolidation)
-        is_consolidation = consol_range < atr_val * 2.0  # Stricter: Range less than 2.0x ATR (was 3.0)
+        is_consolidation = (consol_range / current_price * 100) < self.consolidation_range_pct
         
         # Volume analysis
-        avg_volume = sum(volumes[-20:-1]) / min(19, len(volumes) - 1) if len(volumes) > 1 else 0
-        current_volume = volumes[-1] if volumes else 0
-        volume_surge = current_volume >= avg_volume * self.volume_threshold
+        volume_stats = self.get_volume_stats(volumes, self.volume_lookback)
+        avg_volume = volume_stats["avg"]
+        current_volume = volume_stats["current"]
+        volume_ratio = volume_stats["ratio"]
+        volume_surge = avg_volume and current_volume >= avg_volume * self.volume_threshold
         
-        # Filter: Strong Momentum using ADX
-        if adx_val < 35:  # Raised to 35 to filter out "fake trends" (TSLA/AMD)
+        # Filter: Strong Momentum using ADX (lowered from 35 for more trade opportunities)
+        if adx_val < 25:  # ADX > 25 indicates trending conditions
             return None
         
         signal = None
@@ -115,7 +116,8 @@ class MomentumStrategy(BaseStrategy):
         reasoning_parts = []
         
         # LONG BREAKOUT
-        if current_price > consol_high + (atr_val * self.breakout_atr_mult):
+        breakout_buffer = current_price * (self.volume_adjusted_pct(self.breakout_pct, volume_ratio) / 100)
+        if current_price > consol_high + breakout_buffer:
             # Trend Filter: Price must be aligned with SMA (Trend)
             sma_val = indicators.get('sma')[-1] if indicators.get('sma') else None
             if sma_val and current_price < sma_val:
@@ -156,7 +158,8 @@ class MomentumStrategy(BaseStrategy):
                 reasoning_parts.append("Strong breakout candle")
             
             if confidence >= self.min_confidence:
-                stop_loss = max(consol_low, current_price - atr_val * self.atr_stop_mult)
+                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_loss = max(consol_low, current_price * (1 - stop_pct / 100))
                 take_profit = self.calculate_take_profit(current_price, stop_loss, self.rr_ratio, 'long')
                 
                 signal = Signal(
@@ -174,8 +177,7 @@ class MomentumStrategy(BaseStrategy):
                         'consol_high': consol_high,
                         'consol_low': consol_low,
                         'consol_range': consol_range,
-                        'atr': atr_val,
-                        'volume_ratio': current_volume / avg_volume if avg_volume else 0,
+                        'volume_ratio': volume_ratio,
                         'rsi': rsi_val,
                         'regime': regime.value,
                         'adx': adx_val
@@ -183,7 +185,7 @@ class MomentumStrategy(BaseStrategy):
                 )
         
         # SHORT BREAKDOWN
-        elif current_price < consol_low - (atr_val * self.breakout_atr_mult):
+        elif current_price < consol_low - breakout_buffer:
             # Trend Filter: Price must be aligned with SMA (Trend)
             sma_val = indicators.get('sma')[-1] if indicators.get('sma') else None
             if sma_val and current_price > sma_val:
@@ -223,7 +225,8 @@ class MomentumStrategy(BaseStrategy):
                 reasoning_parts.append("Strong breakdown candle")
             
             if confidence >= self.min_confidence:
-                stop_loss = min(consol_high, current_price + atr_val * self.atr_stop_mult)
+                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_loss = min(consol_high, current_price * (1 + stop_pct / 100))
                 take_profit = self.calculate_take_profit(current_price, stop_loss, self.rr_ratio, 'short')
                 
                 signal = Signal(
@@ -241,8 +244,7 @@ class MomentumStrategy(BaseStrategy):
                         'consol_high': consol_high,
                         'consol_low': consol_low,
                         'consol_range': consol_range,
-                        'atr': atr_val,
-                        'volume_ratio': current_volume / avg_volume if avg_volume else 0,
+                        'volume_ratio': volume_ratio,
                         'rsi': rsi_val,
                         'regime': regime.value,
                         'adx': adx_val
@@ -258,9 +260,11 @@ class MomentumStrategy(BaseStrategy):
         base = super().to_dict()
         base.update({
             'consolidation_bars': self.consolidation_bars,
-            'breakout_atr_mult': self.breakout_atr_mult,
             'volume_threshold': self.volume_threshold,
-            'atr_stop_mult': self.atr_stop_mult,
+            'volume_lookback': self.volume_lookback,
+            'consolidation_range_pct': self.consolidation_range_pct,
+            'breakout_pct': self.breakout_pct,
+            'volume_stop_pct': self.volume_stop_pct,
             'rr_ratio': self.rr_ratio,
             'trailing_stop_pct': self.trailing_stop_pct
         })

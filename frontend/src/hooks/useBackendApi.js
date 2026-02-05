@@ -151,6 +151,51 @@ export function useBackendApi() {
     [fetchState],
   );
 
+  const updateStrategy = useCallback(
+    async (strategyName, params) => {
+      try {
+        const response = await fetch(`${API_URL}/api/strategies/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ strategy_name: strategyName, params }),
+        });
+        if (!response.ok) throw new Error("Failed to update strategy");
+        await fetchState();
+        return await response.json();
+      } catch (err) {
+        console.error("Update strategy error:", err);
+        return null;
+      }
+    },
+    [fetchState],
+  );
+
+  const fetchTradingConfig = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/config/trading`);
+      if (!response.ok) throw new Error("Failed to fetch trading config");
+      return await response.json();
+    } catch (err) {
+      console.error("Trading config fetch error:", err);
+      return null;
+    }
+  }, []);
+
+  const updateTradingConfig = useCallback(async (config) => {
+    try {
+      const response = await fetch(`${API_URL}/api/config/trading`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+      });
+      if (!response.ok) throw new Error("Failed to update trading config");
+      return await response.json();
+    } catch (err) {
+      console.error("Update trading config error:", err);
+      return null;
+    }
+  }, []);
+
   // WebSocket connection
   const connectWebSocket = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -201,6 +246,9 @@ export function useBackendApi() {
     runBacktest,
     resetEngine,
     toggleStrategy,
+    updateStrategy,
+    fetchTradingConfig,
+    updateTradingConfig,
     connectWebSocket,
   };
 }

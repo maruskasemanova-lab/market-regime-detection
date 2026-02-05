@@ -31,9 +31,11 @@ class VWAPMagnetStrategy(BaseStrategy):
         max_distance_pct: float = 3.0,         # Max distance
         bars_since_vwap_threshold: int = 5,    # Faster trigger (was 10)
         volume_confirm: bool = True,           # Require volume confirmation
-        atr_stop_mult: float = 2.0,            # Standard stop (was 1.8)
+        volume_lookback: int = 20,
+        volume_stop_pct: float = 0.7,
         min_confidence: float = 60.0,          # Min confidence
-        trailing_stop_pct: float = 0.4         # Tight trail to VWAP
+        trailing_stop_pct: float = 0.4,        # Tight trail to VWAP
+        long_only: bool = False                # Only take long trades (shorts lose $233)
     ):
         super().__init__(
             name="VWAPMagnet",
@@ -43,9 +45,11 @@ class VWAPMagnetStrategy(BaseStrategy):
         self.max_distance_pct = max_distance_pct
         self.bars_since_vwap_threshold = bars_since_vwap_threshold
         self.volume_confirm = volume_confirm
-        self.atr_stop_mult = atr_stop_mult
+        self.volume_lookback = volume_lookback
+        self.volume_stop_pct = volume_stop_pct
         self.min_confidence = min_confidence
         self.trailing_stop_pct = trailing_stop_pct
+        self.long_only = long_only
         
     def _bars_since_vwap_touch(
         self, 
@@ -121,14 +125,12 @@ class VWAPMagnetStrategy(BaseStrategy):
         
         # Get indicators
         vwap = indicators.get('vwap')
-        atr = indicators.get('atr')
         rsi = indicators.get('rsi')
         
-        if vwap is None or atr is None:
+        if vwap is None:
             return None
             
         vwap_val = vwap[-1] if isinstance(vwap, list) else vwap
-        atr_val = atr[-1] if isinstance(atr, list) else atr
         rsi_val = rsi[-1] if isinstance(rsi, list) else (rsi or 50)
         
         # Get OHLC
@@ -157,9 +159,11 @@ class VWAPMagnetStrategy(BaseStrategy):
         vol_profile = self._calculate_vwap_volume_profile(closes, volumes, vwap_val)
         
         # Current volume vs average
-        avg_volume = sum(volumes[-20:]) / 20
-        current_volume = volumes[-1]
-        volume_declining = current_volume < avg_volume * 0.8
+        volume_stats = self.get_volume_stats(volumes, self.volume_lookback)
+        avg_volume = volume_stats["avg"]
+        current_volume = volume_stats["current"]
+        volume_ratio = volume_stats["ratio"]
+        volume_declining = avg_volume and current_volume < avg_volume * 0.8
         
         signal = None
         confidence = 50.0
@@ -179,7 +183,7 @@ class VWAPMagnetStrategy(BaseStrategy):
             reasoning_parts.append(f"{bars_since} bars since VWAP touch")
         
         # Volume exhaustion score
-        if volume_declining:
+        if self.volume_confirm and volume_declining:
             confidence += 10
             reasoning_parts.append("Volume declining (exhaustion)")
         
@@ -201,7 +205,8 @@ class VWAPMagnetStrategy(BaseStrategy):
                 reasoning_parts.append("CHOPPY regime favors VWAP return")
             
             if confidence >= self.min_confidence:
-                stop_loss = self.calculate_atr_stop(current_price, atr_val, self.atr_stop_mult, 'long')
+                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_loss = self.calculate_percent_stop(current_price, stop_pct, 'long')
                 take_profit = vwap_val  # Target VWAP exactly
                 
                 signal = Signal(
@@ -220,14 +225,14 @@ class VWAPMagnetStrategy(BaseStrategy):
                         'vwap_distance_pct': vwap_distance_pct,
                         'bars_since_vwap': bars_since,
                         'volume_profile': vol_profile,
-                        'atr': atr_val,
+                        'volume_ratio': volume_ratio,
                         'rsi': rsi_val,
                         'regime': regime.value
                     }
                 )
-        
         # SHORT SIGNAL: Price above VWAP, expect pull down
-        else:
+        # Skip if long_only mode is enabled
+        elif not self.long_only:
             # Volume profile: high volume above = resistance
             if vol_profile['above'] > 0.4:
                 confidence += 10
@@ -243,7 +248,8 @@ class VWAPMagnetStrategy(BaseStrategy):
                 reasoning_parts.append("CHOPPY regime favors VWAP return")
             
             if confidence >= self.min_confidence:
-                stop_loss = self.calculate_atr_stop(current_price, atr_val, self.atr_stop_mult, 'short')
+                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_loss = self.calculate_percent_stop(current_price, stop_pct, 'short')
                 take_profit = vwap_val
                 
                 signal = Signal(
@@ -262,7 +268,7 @@ class VWAPMagnetStrategy(BaseStrategy):
                         'vwap_distance_pct': vwap_distance_pct,
                         'bars_since_vwap': bars_since,
                         'volume_profile': vol_profile,
-                        'atr': atr_val,
+                        'volume_ratio': volume_ratio,
                         'rsi': rsi_val,
                         'regime': regime.value
                     }
@@ -280,7 +286,8 @@ class VWAPMagnetStrategy(BaseStrategy):
             'max_distance_pct': self.max_distance_pct,
             'bars_since_vwap_threshold': self.bars_since_vwap_threshold,
             'volume_confirm': self.volume_confirm,
-            'atr_stop_mult': self.atr_stop_mult,
+            'volume_lookback': self.volume_lookback,
+            'volume_stop_pct': self.volume_stop_pct,
             'trailing_stop_pct': self.trailing_stop_pct
         })
         return base

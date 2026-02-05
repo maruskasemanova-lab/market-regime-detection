@@ -670,3 +670,38 @@ tr:hover td {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* ============ Configuration Panel ============ */
+
+.config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.config-field label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  text-transform: capitalize;
+}
+
+.config-field input {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  font-family: 'JetBrains Mono', monospace;
+  transition: all var(--transition-fast);
+}
+
+.config-field input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.config-field input:hover {
+  border-color: var(--accent-blue-light);
+}
