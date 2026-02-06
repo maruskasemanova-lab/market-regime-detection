@@ -5,7 +5,7 @@ Manages trading sessions for individual days with regime detection and strategy 
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from enum import Enum
 import json
 import logging
@@ -43,6 +43,10 @@ class BarData:
     l2_sell_volume: Optional[float] = None
     l2_volume: Optional[float] = None
     l2_imbalance: Optional[float] = None
+    l2_bid_depth_total: Optional[float] = None
+    l2_ask_depth_total: Optional[float] = None
+    l2_book_pressure: Optional[float] = None
+    l2_book_pressure_change: Optional[float] = None
     l2_iceberg_buy_count: Optional[float] = None
     l2_iceberg_sell_count: Optional[float] = None
     l2_iceberg_bias: Optional[float] = None
@@ -61,6 +65,10 @@ class BarData:
             'l2_sell_volume': self.l2_sell_volume,
             'l2_volume': self.l2_volume,
             'l2_imbalance': self.l2_imbalance,
+            'l2_bid_depth_total': self.l2_bid_depth_total,
+            'l2_ask_depth_total': self.l2_ask_depth_total,
+            'l2_book_pressure': self.l2_book_pressure,
+            'l2_book_pressure_change': self.l2_book_pressure_change,
             'l2_iceberg_buy_count': self.l2_iceberg_buy_count,
             'l2_iceberg_sell_count': self.l2_iceberg_sell_count,
             'l2_iceberg_bias': self.l2_iceberg_bias,
@@ -87,12 +95,15 @@ class DayTrade:
     reg_fee: float = 0.0
     sec_fee: float = 0.0
     finra_fee: float = 0.0
+    market_impact: float = 0.0
     total_costs: float = 0.0
     gross_pnl_pct: float = 0.0  # PnL before costs
     signal_bar_index: Optional[int] = None
     entry_bar_index: Optional[int] = None
     signal_timestamp: Optional[str] = None
     signal_price: Optional[float] = None
+    signal_metadata: Dict[str, Any] = field(default_factory=dict)
+    flow_snapshot: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -113,6 +124,7 @@ class DayTrade:
                 'reg_fee': round(self.reg_fee, 4),
                 'sec_fee': round(self.sec_fee, 6),
                 'finra_fee': round(self.finra_fee, 6),
+                'market_impact': round(self.market_impact, 4),
                 'total': round(self.total_costs, 4)
             },
             'gross_pnl_pct': round(self.gross_pnl_pct, 2),
@@ -120,6 +132,8 @@ class DayTrade:
             'entry_bar_index': self.entry_bar_index,
             'signal_timestamp': self.signal_timestamp,
             'signal_price': round(self.signal_price, 4) if self.signal_price is not None else None,
+            'signal_metadata': self.signal_metadata,
+            'flow_snapshot': self.flow_snapshot,
         }
 
 
@@ -137,6 +151,11 @@ class TradingCosts:
     commission_min: float = 0.35      # per order (per side)
     # 0.5¢ per side so round‑trip slippage totals 1¢ per share.
     slippage_per_share: float = 0.005
+    # Slippage and impact realism controls.
+    low_volume_threshold_shares: float = 25_000.0
+    low_volume_slippage_multiplier: float = 1.75
+    impact_coeff_bps: float = 6.0
+    impact_participation_cap: float = 0.20
     finra_fee_per_share: float = 0.000195
     finra_fee_cap: float = 9.79
     finra_fee_min: float = 0.01
@@ -148,14 +167,25 @@ class TradingCosts:
         entry_price: float,
         exit_price: float,
         shares: float,
-        side: str
+        side: str,
+        avg_bar_volume: Optional[float] = None,
     ) -> Dict[str, float]:
         """
         Calculate all trading costs.
         Returns dict with commission, reg_fee, slippage, finra_fee, total.
         """
-        # Slippage: $0.01 per share on both entry and exit
-        slippage_cost = self.slippage_per_share * shares * 2
+        # Estimate participation to model liquidity-dependent slippage/impact.
+        avg_volume = float(avg_bar_volume or 0.0)
+        participation_ratio = shares / avg_volume if avg_volume > 0 else 0.0
+
+        volume_multiplier = 1.0
+        if avg_volume > 0 and avg_volume < self.low_volume_threshold_shares:
+            shortage = (self.low_volume_threshold_shares - avg_volume) / self.low_volume_threshold_shares
+            volume_multiplier += shortage * max(0.0, self.low_volume_slippage_multiplier - 1.0)
+
+        participation_multiplier = 1.0 + max(0.0, participation_ratio - 0.02) * 6.0
+        dynamic_slippage_per_share = self.slippage_per_share * volume_multiplier * participation_multiplier
+        slippage_cost = dynamic_slippage_per_share * shares * 2
 
         # Commission per side with minimum
         entry_commission = max(self.commission_per_share * shares, self.commission_min)
@@ -176,7 +206,14 @@ class TradingCosts:
         # Optional pass-through reg fee (SELL side only; default 0)
         reg_fee = shares * self.reg_fee_per_share
 
-        total = slippage_cost + commission + reg_fee + finra_fee + sec_fee
+        impact_ratio = min(
+            1.0,
+            participation_ratio / max(1e-6, float(self.impact_participation_cap)),
+        )
+        avg_notional = ((entry_price + exit_price) / 2.0) * shares
+        market_impact = avg_notional * ((self.impact_coeff_bps * impact_ratio) / 10_000.0)
+
+        total = slippage_cost + commission + reg_fee + finra_fee + sec_fee + market_impact
         
         return {
             'slippage': slippage_cost,
@@ -184,6 +221,9 @@ class TradingCosts:
             'reg_fee': reg_fee,
             'sec_fee': sec_fee,
             'finra_fee': finra_fee,
+            'market_impact': market_impact,
+            'dynamic_slippage_per_share': dynamic_slippage_per_share,
+            'participation_ratio': participation_ratio,
             'total': total
         }
 
@@ -234,6 +274,18 @@ class TradingSession:
     total_pnl: float = 0.0
     regime_start_ts: Optional[datetime] = None
     account_size_usd: float = 10_000.0
+    risk_per_trade_pct: float = 1.0
+    max_position_notional_pct: float = 100.0
+    min_position_size: float = 1.0
+    max_fill_participation_rate: float = 0.20
+    min_fill_ratio: float = 0.35
+    enable_partial_take_profit: bool = True
+    partial_take_profit_rr: float = 1.0
+    partial_take_profit_fraction: float = 0.5
+    time_exit_bars: int = 40
+    adverse_flow_exit_enabled: bool = True
+    adverse_flow_threshold: float = 0.12
+    adverse_flow_min_hold_bars: int = 3
     l2_confirm_enabled: bool = False
     l2_min_delta: float = 0.0
     l2_min_imbalance: float = 0.0
@@ -272,6 +324,18 @@ class TradingSession:
             'l2_min_signed_aggression': self.l2_min_signed_aggression,
             'regime_refresh_bars': self.regime_refresh_bars,
             'regime_history': list(self.regime_history),
+            'risk_per_trade_pct': self.risk_per_trade_pct,
+            'max_position_notional_pct': self.max_position_notional_pct,
+            'min_position_size': self.min_position_size,
+            'max_fill_participation_rate': self.max_fill_participation_rate,
+            'min_fill_ratio': self.min_fill_ratio,
+            'enable_partial_take_profit': self.enable_partial_take_profit,
+            'partial_take_profit_rr': self.partial_take_profit_rr,
+            'partial_take_profit_fraction': self.partial_take_profit_fraction,
+            'time_exit_bars': self.time_exit_bars,
+            'adverse_flow_exit_enabled': self.adverse_flow_exit_enabled,
+            'adverse_flow_threshold': self.adverse_flow_threshold,
+            'adverse_flow_min_hold_bars': self.adverse_flow_min_hold_bars,
         }
 
 
@@ -289,6 +353,15 @@ class DayTradingManager:
         max_trades_per_day: int = 3,
         trade_cooldown_bars: int = 15,  # Cooldown between trades in bars
         regime_refresh_bars: int = 12,
+        risk_per_trade_pct: float = 1.0,
+        max_position_notional_pct: float = 100.0,
+        time_exit_bars: int = 40,
+        enable_partial_take_profit: bool = True,
+        partial_take_profit_rr: float = 1.0,
+        partial_take_profit_fraction: float = 0.5,
+        adverse_flow_exit_enabled: bool = True,
+        adverse_flow_exit_threshold: float = 0.12,
+        adverse_flow_min_hold_bars: int = 3,
     ):
         self.sessions: Dict[str, TradingSession] = {}  # session_key -> TradingSession
         self.regime_detection_minutes = regime_detection_minutes
@@ -297,6 +370,17 @@ class DayTradingManager:
         self.max_trades_per_day = max_trades_per_day  # Limit trades to reduce fees
         self.trade_cooldown_bars = trade_cooldown_bars  # Cooldown between trades
         self.regime_refresh_bars = max(3, int(regime_refresh_bars))
+        self.risk_per_trade_pct = max(0.1, float(risk_per_trade_pct))
+        self.max_position_notional_pct = max(1.0, float(max_position_notional_pct))
+        self.max_fill_participation_rate = 0.20
+        self.min_fill_ratio = 0.35
+        self.time_exit_bars = max(1, int(time_exit_bars))
+        self.enable_partial_take_profit = bool(enable_partial_take_profit)
+        self.partial_take_profit_rr = max(0.25, float(partial_take_profit_rr))
+        self.partial_take_profit_fraction = min(0.95, max(0.05, float(partial_take_profit_fraction)))
+        self.adverse_flow_exit_enabled = bool(adverse_flow_exit_enabled)
+        self.adverse_flow_exit_threshold = max(0.02, float(adverse_flow_exit_threshold))
+        self.adverse_flow_min_hold_bars = max(1, int(adverse_flow_min_hold_bars))
         self.market_tz = ZoneInfo("America/New_York")
         self.run_defaults: Dict[tuple, Dict[str, Any]] = {}
         
@@ -304,8 +388,8 @@ class DayTradingManager:
 
         # Multi-layer decision engine
         self.multi_layer = MultiLayerDecision(
-            pattern_weight=0.2,
-            strategy_weight=0.8,
+            pattern_weight=0.05,
+            strategy_weight=0.95,
             threshold=65.0,
             require_pattern=False,
         )
@@ -546,11 +630,17 @@ class DayTradingManager:
         """Build a per-session multi-layer engine using ticker overrides."""
         ticker_cfg = self.ticker_params.get(str(ticker).upper(), {})
         ml_overrides = ticker_cfg.get("multilayer", {}) if isinstance(ticker_cfg, dict) else {}
+        l2_cfg = ticker_cfg.get("l2", {}) if isinstance(ticker_cfg, dict) else {}
+        l2_confirm_enabled = bool(l2_cfg.get("confirm_enabled", False)) if isinstance(l2_cfg, dict) else False
 
         base_ml = self.multi_layer
+        strategy_weight = float(ml_overrides.get("strategy_weight", base_ml.strategy_weight))
+        if l2_confirm_enabled:
+            # In flow mode, keep strategy confidence unattenuated by weight scaling.
+            strategy_weight = 1.0
         ml = MultiLayerDecision(
             pattern_weight=float(ml_overrides.get("pattern_weight", base_ml.pattern_weight)),
-            strategy_weight=float(ml_overrides.get("strategy_weight", base_ml.strategy_weight)),
+            strategy_weight=strategy_weight,
             threshold=float(ml_overrides.get("threshold", base_ml.threshold)),
             require_pattern=self._safe_bool(
                 ml_overrides.get("require_pattern", base_ml.require_pattern),
@@ -657,6 +747,17 @@ class DayTradingManager:
                 regime_detection_minutes=regime_detection_minutes or self.regime_detection_minutes
             )
             self.sessions[key].regime_refresh_bars = self.regime_refresh_bars
+            self.sessions[key].risk_per_trade_pct = self.risk_per_trade_pct
+            self.sessions[key].max_position_notional_pct = self.max_position_notional_pct
+            self.sessions[key].time_exit_bars = self.time_exit_bars
+            self.sessions[key].max_fill_participation_rate = self.max_fill_participation_rate
+            self.sessions[key].min_fill_ratio = self.min_fill_ratio
+            self.sessions[key].enable_partial_take_profit = self.enable_partial_take_profit
+            self.sessions[key].partial_take_profit_rr = self.partial_take_profit_rr
+            self.sessions[key].partial_take_profit_fraction = self.partial_take_profit_fraction
+            self.sessions[key].adverse_flow_exit_enabled = self.adverse_flow_exit_enabled
+            self.sessions[key].adverse_flow_threshold = self.adverse_flow_exit_threshold
+            self.sessions[key].adverse_flow_min_hold_bars = self.adverse_flow_min_hold_bars
             self.sessions[key].multi_layer = self._build_multilayer_for_ticker(ticker)
             ticker_cfg = self.ticker_params.get(str(ticker).upper(), {})
             l2_cfg = ticker_cfg.get("l2", {}) if isinstance(ticker_cfg, dict) else {}
@@ -697,6 +798,17 @@ class DayTradingManager:
         regime_detection_minutes: Optional[int] = None,
         regime_refresh_bars: Optional[int] = None,
         account_size_usd: Optional[float] = None,
+        risk_per_trade_pct: Optional[float] = None,
+        max_position_notional_pct: Optional[float] = None,
+        max_fill_participation_rate: Optional[float] = None,
+        min_fill_ratio: Optional[float] = None,
+        enable_partial_take_profit: Optional[bool] = None,
+        partial_take_profit_rr: Optional[float] = None,
+        partial_take_profit_fraction: Optional[float] = None,
+        time_exit_bars: Optional[int] = None,
+        adverse_flow_exit_enabled: Optional[bool] = None,
+        adverse_flow_threshold: Optional[float] = None,
+        adverse_flow_min_hold_bars: Optional[int] = None,
         l2_confirm_enabled: Optional[bool] = None,
         l2_min_delta: Optional[float] = None,
         l2_min_imbalance: Optional[float] = None,
@@ -715,6 +827,28 @@ class DayTradingManager:
             defaults["regime_refresh_bars"] = max(3, int(regime_refresh_bars))
         if account_size_usd is not None:
             defaults["account_size_usd"] = account_size_usd
+        if risk_per_trade_pct is not None:
+            defaults["risk_per_trade_pct"] = max(0.1, float(risk_per_trade_pct))
+        if max_position_notional_pct is not None:
+            defaults["max_position_notional_pct"] = max(1.0, float(max_position_notional_pct))
+        if max_fill_participation_rate is not None:
+            defaults["max_fill_participation_rate"] = min(1.0, max(0.01, float(max_fill_participation_rate)))
+        if min_fill_ratio is not None:
+            defaults["min_fill_ratio"] = min(1.0, max(0.01, float(min_fill_ratio)))
+        if enable_partial_take_profit is not None:
+            defaults["enable_partial_take_profit"] = bool(enable_partial_take_profit)
+        if partial_take_profit_rr is not None:
+            defaults["partial_take_profit_rr"] = max(0.25, float(partial_take_profit_rr))
+        if partial_take_profit_fraction is not None:
+            defaults["partial_take_profit_fraction"] = min(0.95, max(0.05, float(partial_take_profit_fraction)))
+        if time_exit_bars is not None:
+            defaults["time_exit_bars"] = max(1, int(time_exit_bars))
+        if adverse_flow_exit_enabled is not None:
+            defaults["adverse_flow_exit_enabled"] = bool(adverse_flow_exit_enabled)
+        if adverse_flow_threshold is not None:
+            defaults["adverse_flow_threshold"] = max(0.02, float(adverse_flow_threshold))
+        if adverse_flow_min_hold_bars is not None:
+            defaults["adverse_flow_min_hold_bars"] = max(1, int(adverse_flow_min_hold_bars))
         if l2_confirm_enabled is not None:
             defaults["l2_confirm_enabled"] = bool(l2_confirm_enabled)
         if l2_min_delta is not None:
@@ -768,6 +902,28 @@ class DayTradingManager:
         )
         if "account_size_usd" in defaults:
             session.account_size_usd = defaults["account_size_usd"]
+        if "risk_per_trade_pct" in defaults:
+            session.risk_per_trade_pct = float(defaults["risk_per_trade_pct"])
+        if "max_position_notional_pct" in defaults:
+            session.max_position_notional_pct = float(defaults["max_position_notional_pct"])
+        if "max_fill_participation_rate" in defaults:
+            session.max_fill_participation_rate = min(1.0, max(0.01, float(defaults["max_fill_participation_rate"])))
+        if "min_fill_ratio" in defaults:
+            session.min_fill_ratio = min(1.0, max(0.01, float(defaults["min_fill_ratio"])))
+        if "enable_partial_take_profit" in defaults:
+            session.enable_partial_take_profit = bool(defaults["enable_partial_take_profit"])
+        if "partial_take_profit_rr" in defaults:
+            session.partial_take_profit_rr = max(0.25, float(defaults["partial_take_profit_rr"]))
+        if "partial_take_profit_fraction" in defaults:
+            session.partial_take_profit_fraction = min(0.95, max(0.05, float(defaults["partial_take_profit_fraction"])))
+        if "time_exit_bars" in defaults:
+            session.time_exit_bars = max(1, int(defaults["time_exit_bars"]))
+        if "adverse_flow_exit_enabled" in defaults:
+            session.adverse_flow_exit_enabled = bool(defaults["adverse_flow_exit_enabled"])
+        if "adverse_flow_threshold" in defaults:
+            session.adverse_flow_threshold = max(0.02, float(defaults["adverse_flow_threshold"]))
+        if "adverse_flow_min_hold_bars" in defaults:
+            session.adverse_flow_min_hold_bars = max(1, int(defaults["adverse_flow_min_hold_bars"]))
         if "regime_refresh_bars" in defaults:
             session.regime_refresh_bars = max(3, int(defaults["regime_refresh_bars"]))
         if "l2_confirm_enabled" in defaults:
@@ -809,6 +965,10 @@ class DayTradingManager:
             l2_sell_volume=bar_data.get('l2_sell_volume'),
             l2_volume=bar_data.get('l2_volume'),
             l2_imbalance=bar_data.get('l2_imbalance'),
+            l2_bid_depth_total=bar_data.get('l2_bid_depth_total'),
+            l2_ask_depth_total=bar_data.get('l2_ask_depth_total'),
+            l2_book_pressure=bar_data.get('l2_book_pressure'),
+            l2_book_pressure_change=bar_data.get('l2_book_pressure_change'),
             l2_iceberg_buy_count=bar_data.get('l2_iceberg_buy_count'),
             l2_iceberg_sell_count=bar_data.get('l2_iceberg_sell_count'),
             l2_iceberg_bias=bar_data.get('l2_iceberg_bias'),
@@ -858,8 +1018,18 @@ class DayTradingManager:
                     tzinfo=self.market_tz
                 )
             elapsed_minutes = (market_ts - session.regime_start_ts).total_seconds() / 60.0
+            effective_regime_minutes = session.regime_detection_minutes
+            if self._bar_has_l2_data(bar):
+                effective_regime_minutes = min(effective_regime_minutes, 10)
+            elif len(session.bars) >= 3:
+                flow_probe = self._calculate_order_flow_metrics(
+                    session.bars,
+                    lookback=min(10, len(session.bars)),
+                )
+                if flow_probe.get("has_l2_coverage", False):
+                    effective_regime_minutes = min(effective_regime_minutes, 10)
             
-            if elapsed_minutes >= session.regime_detection_minutes:
+            if elapsed_minutes >= effective_regime_minutes:
                 # Detect regime
                 regime = self._detect_regime(session)
                 session.detected_regime = regime
@@ -901,13 +1071,17 @@ class DayTradingManager:
                     'flow_score': float(flow.get('flow_score', 0.0) or 0.0),
                     'signed_aggression': float(flow.get('signed_aggression', 0.0) or 0.0),
                     'absorption_rate': float(flow.get('absorption_rate', 0.0) or 0.0),
+                    'book_pressure_avg': float(flow.get('book_pressure_avg', 0.0) or 0.0),
+                    'book_pressure_trend': float(flow.get('book_pressure_trend', 0.0) or 0.0),
+                    'large_trader_activity': float(flow.get('large_trader_activity', 0.0) or 0.0),
+                    'vwap_execution_flow': float(flow.get('vwap_execution_flow', 0.0) or 0.0),
                 }
             else:
                 result['action'] = 'collecting_regime_data'
                 minutes_elapsed = int(elapsed_minutes)
                 result['minutes_remaining'] = max(
                     0,
-                    session.regime_detection_minutes - minutes_elapsed
+                    effective_regime_minutes - minutes_elapsed
                 )
                 
         elif session.phase == SessionPhase.TRADING:
@@ -918,7 +1092,13 @@ class DayTradingManager:
             if bar_time >= session.market_close or bar_time >= time(15, 55):
                 # Close any open position
                 if session.active_position:
-                    trade = self._close_position(session, bar.close, timestamp, 'end_of_day')
+                    trade = self._close_position(
+                        session,
+                        bar.close,
+                        timestamp,
+                        'end_of_day',
+                        bar_volume=bar.volume,
+                    )
                     result['trade_closed'] = trade.to_dict()
                 
                 session.phase = SessionPhase.END_OF_DAY
@@ -1015,18 +1195,36 @@ class DayTradingManager:
         consistency = float(flow.get("directional_consistency", 0.0))
         sweep_intensity = float(flow.get("sweep_intensity", 0.0))
         absorption_rate = float(flow.get("absorption_rate", 0.0))
+        book_pressure_avg = float(flow.get("book_pressure_avg", 0.0))
+        large_trader_activity = float(flow.get("large_trader_activity", 0.0))
+        vwap_execution_flow = float(flow.get("vwap_execution_flow", 0.0))
         price_change_pct = float(flow.get("price_change_pct", 0.0))
         flow_has_coverage = bool(flow.get("has_l2_coverage", False))
 
         if flow_has_coverage:
-            if sweep_intensity >= 0.35 and consistency >= 0.55 and abs(signed_aggr) >= 0.10:
+            trend_eff_threshold = 0.45 if adx > 35.0 else 0.58
+
+            # Large one-way sessions should not be blocked by efficiency checks.
+            if abs(price_change_pct) > 2.0:
+                return "TRENDING_UP" if price_change_pct >= 0 else "TRENDING_DOWN"
+
+            if (
+                sweep_intensity >= 0.30
+                and consistency >= 0.55
+                and abs(signed_aggr) >= 0.10
+                and large_trader_activity >= 0.15
+            ):
                 return "BREAKOUT"
-            if absorption_rate >= 0.58 and abs(price_change_pct) <= max(0.12, volatility * 100.0 * 0.8):
+            if (
+                absorption_rate >= 0.50
+                and abs(book_pressure_avg) >= 0.10
+                and abs(price_change_pct) <= max(0.12, volatility * 100.0 * 0.8)
+            ):
                 return "ABSORPTION"
 
-            if trend_efficiency >= 0.58 and adx >= 25.0 and signed_aggr >= 0.08 and price_bias > 0:
+            if trend_efficiency >= trend_eff_threshold and adx >= 25.0 and signed_aggr >= 0.08 and price_bias > 0:
                 return "TRENDING_UP"
-            if trend_efficiency >= 0.58 and adx >= 25.0 and signed_aggr <= -0.08 and price_bias < 0:
+            if trend_efficiency >= trend_eff_threshold and adx >= 25.0 and signed_aggr <= -0.08 and price_bias < 0:
                 return "TRENDING_DOWN"
 
             if adx < 20.0 and trend_efficiency < 0.40:
@@ -1061,13 +1259,21 @@ class DayTradingManager:
         imbalances: List[float] = []
         iceberg_biases: List[float] = []
         l2_volumes: List[float] = []
+        book_pressures: List[float] = []
+        book_pressure_changes: List[float] = []
+        bid_depth_totals: List[float] = []
+        ask_depth_totals: List[float] = []
         bar_volumes: List[float] = []
         close_to_close_pct: List[float] = []
+        vwap_cluster_l2_volume = 0.0
         for i, b in enumerate(window):
             has_l2 = (
                 b.l2_delta is not None
                 or b.l2_imbalance is not None
                 or b.l2_volume is not None
+                or b.l2_book_pressure is not None
+                or b.l2_bid_depth_total is not None
+                or b.l2_ask_depth_total is not None
                 or b.l2_iceberg_bias is not None
             )
             if has_l2:
@@ -1077,7 +1283,15 @@ class DayTradingManager:
             imbalances.append(self._to_float(b.l2_imbalance, 0.0))
             iceberg_biases.append(self._to_float(b.l2_iceberg_bias, 0.0))
             l2_volumes.append(max(0.0, self._to_float(b.l2_volume, 0.0)))
+            book_pressures.append(self._to_float(b.l2_book_pressure, 0.0))
+            book_pressure_changes.append(self._to_float(b.l2_book_pressure_change, 0.0))
+            bid_depth_totals.append(max(0.0, self._to_float(b.l2_bid_depth_total, 0.0)))
+            ask_depth_totals.append(max(0.0, self._to_float(b.l2_ask_depth_total, 0.0)))
             bar_volumes.append(max(0.0, self._to_float(b.volume, 0.0)))
+            if b.vwap is not None and b.close > 0:
+                vwap_distance_pct = abs((b.close - b.vwap) / b.close) * 100.0
+                if vwap_distance_pct <= 0.05:
+                    vwap_cluster_l2_volume += l2_volumes[-1]
 
             if i > 0 and window[i - 1].close > 0:
                 close_to_close_pct.append((b.close - window[i - 1].close) / window[i - 1].close * 100.0)
@@ -1090,6 +1304,17 @@ class DayTradingManager:
         total_bar_volume = float(sum(bar_volumes))
         participation_ratio = self._safe_div(total_l2_volume, total_bar_volume, 0.0)
         signed_aggression = self._safe_div(cumulative_delta, total_l2_volume, 0.0)
+        avg_bid_depth_total = float(sum(bid_depth_totals) / len(bid_depth_totals)) if bid_depth_totals else 0.0
+        avg_ask_depth_total = float(sum(ask_depth_totals) / len(ask_depth_totals)) if ask_depth_totals else 0.0
+        book_pressure_avg = float(sum(book_pressures) / len(book_pressures)) if book_pressures else 0.0
+        book_pressure_change_avg = (
+            float(sum(book_pressure_changes) / len(book_pressure_changes))
+            if book_pressure_changes else 0.0
+        )
+        if len(book_pressures) >= 2:
+            book_pressure_trend = float(book_pressures[-1] - book_pressures[0])
+        else:
+            book_pressure_trend = float(book_pressure_change_avg)
 
         # Delta acceleration compares current window against immediate previous window.
         prev_window = bars[-(window_size * 2): -window_size] if len(bars) > window_size else []
@@ -1132,10 +1357,15 @@ class DayTradingManager:
         delta_std = math.sqrt(delta_variance) if delta_variance > 0 else 0.0
         avg_l2_volume = sum(l2_volumes) / len(l2_volumes) if l2_volumes else 0.0
         sweep_hits = 0
+        large_trade_hits = 0
         for d, lv in zip(abs_deltas, l2_volumes):
             if d >= (mean_abs_delta + delta_std) and lv >= (avg_l2_volume * 1.2):
                 sweep_hits += 1
+            if lv >= max(avg_l2_volume * 1.8, 5_000.0):
+                large_trade_hits += 1
         sweep_intensity = self._safe_div(float(sweep_hits), float(len(window)), 0.0)
+        large_trader_activity = self._safe_div(float(large_trade_hits), float(len(window)), 0.0)
+        vwap_execution_flow = self._safe_div(vwap_cluster_l2_volume, total_l2_volume, 0.0)
 
         # Last-delta z-score for exhaustion checks.
         delta_mean = sum(deltas) / len(deltas) if deltas else 0.0
@@ -1157,11 +1387,14 @@ class DayTradingManager:
         delta_price_divergence = signed_aggression - normalized_price
 
         flow_score = 100.0 * (
-            0.28 * self._safe_div(abs(cumulative_delta), abs(cumulative_delta) + 5000.0, 0.0)
-            + 0.22 * max(0.0, min(1.0, directional_consistency))
-            + 0.20 * max(0.0, min(1.0, abs(avg_imbalance)))
-            + 0.15 * max(0.0, min(1.0, sweep_intensity))
-            + 0.15 * max(0.0, min(1.0, participation_ratio))
+            0.22 * self._safe_div(abs(cumulative_delta), abs(cumulative_delta) + 5000.0, 0.0)
+            + 0.19 * max(0.0, min(1.0, directional_consistency))
+            + 0.15 * max(0.0, min(1.0, abs(avg_imbalance)))
+            + 0.11 * max(0.0, min(1.0, sweep_intensity))
+            + 0.10 * max(0.0, min(1.0, participation_ratio))
+            + 0.08 * max(0.0, min(1.0, large_trader_activity))
+            + 0.07 * max(0.0, min(1.0, vwap_execution_flow))
+            + 0.08 * max(0.0, min(1.0, abs(book_pressure_avg)))
         )
 
         return {
@@ -1177,7 +1410,14 @@ class DayTradingManager:
             "directional_consistency": directional_consistency,
             "signed_aggression": signed_aggression,
             "absorption_rate": absorption_rate,
+            "book_pressure_avg": book_pressure_avg,
+            "book_pressure_trend": book_pressure_trend,
+            "book_pressure_change_avg": book_pressure_change_avg,
+            "bid_depth_total_avg": avg_bid_depth_total,
+            "ask_depth_total_avg": avg_ask_depth_total,
             "sweep_intensity": sweep_intensity,
+            "large_trader_activity": large_trader_activity,
+            "vwap_execution_flow": vwap_execution_flow,
             "price_change_pct": price_change_pct,
             "realized_volatility_pct": realized_volatility_pct,
             "delta_price_divergence": delta_price_divergence,
@@ -1517,6 +1757,10 @@ class DayTradingManager:
                 "flow_score": float(flow.get("flow_score", 0.0) or 0.0),
                 "signed_aggression": float(flow.get("signed_aggression", 0.0) or 0.0),
                 "absorption_rate": float(flow.get("absorption_rate", 0.0) or 0.0),
+                "book_pressure_avg": float(flow.get("book_pressure_avg", 0.0) or 0.0),
+                "book_pressure_trend": float(flow.get("book_pressure_trend", 0.0) or 0.0),
+                "large_trader_activity": float(flow.get("large_trader_activity", 0.0) or 0.0),
+                "vwap_execution_flow": float(flow.get("vwap_execution_flow", 0.0) or 0.0),
             },
         }
         session.regime_history.append(payload)
@@ -1566,23 +1810,31 @@ class DayTradingManager:
                 entry_time=timestamp,
                 signal_bar_index=session.pending_signal_bar_index,
                 entry_bar_index=current_bar_index,
+                entry_bar_volume=bar.volume,
             )
             session.pending_signal = None
             session.pending_signal_bar_index = -1
-            self.last_trade_bar_index[session_key] = current_bar_index
-            result['action'] = 'position_opened'
-            result['position'] = position.to_dict()
-            result['position_opened'] = {
-                'entry_price': position.entry_price,
-                'side': position.side,
-                'strategy': position.strategy_name,
-                'size': position.size,
-                'stop_loss': position.stop_loss,
-                'take_profit': position.take_profit,
-                'reasoning': signal.reasoning,
-                'confidence': signal.confidence,
-                'metadata': signal.metadata
-            }
+            if position.size > 0:
+                self.last_trade_bar_index[session_key] = current_bar_index
+                result['action'] = 'position_opened'
+                result['position'] = position.to_dict()
+                result['position_opened'] = {
+                    'entry_price': position.entry_price,
+                    'side': position.side,
+                    'strategy': position.strategy_name,
+                    'size': position.size,
+                    'fill_ratio': position.fill_ratio,
+                    'stop_loss': position.stop_loss,
+                    'take_profit': position.take_profit,
+                    'partial_take_profit_price': position.partial_take_profit_price,
+                    'reasoning': signal.reasoning,
+                    'confidence': signal.confidence,
+                    'metadata': signal.metadata
+                }
+            else:
+                session.active_position = None
+                result['action'] = 'insufficient_fill'
+                result['reason'] = 'Position size after risk/fill constraints is zero.'
         
         # If we have an active position, manage it
         if session.active_position:
@@ -1592,7 +1844,13 @@ class DayTradingManager:
             exit = self._resolve_exit_for_bar(pos, bar)
             if exit:
                 exit_reason, exit_fill_price = exit
-                trade = self._close_position(session, exit_fill_price, timestamp, exit_reason)
+                trade = self._close_position(
+                    session,
+                    exit_fill_price,
+                    timestamp,
+                    exit_reason,
+                    bar_volume=bar.volume,
+                )
                 session.last_exit_bar_index = current_bar_index
                 result['trade_closed'] = trade.to_dict()
                 result['action'] = f'position_closed_{exit_reason}'
@@ -1619,9 +1877,66 @@ class DayTradingManager:
                         'reg_fee': round(trade.reg_fee, 4),
                         'sec_fee': round(trade.sec_fee, 6),
                         'finra_fee': round(trade.finra_fee, 6),
+                        'market_impact': round(trade.market_impact, 4),
                         'total': round(trade.total_costs, 4)
                     }
                 }
+
+            # Optional partial scale-out at 1R before final exit.
+            if session.active_position:
+                partial_trade = self._maybe_take_partial_profit(session, session.active_position, bar, timestamp)
+                if partial_trade:
+                    result['partial_trade_closed'] = partial_trade.to_dict()
+                    result['action'] = 'partial_take_profit'
+
+            # Time-based exit if trade stalls too long.
+            if session.active_position and self._should_time_exit(session, session.active_position, current_bar_index):
+                trade = self._close_position(
+                    session,
+                    bar.close,
+                    timestamp,
+                    "time_exit",
+                    bar_volume=bar.volume,
+                )
+                session.last_exit_bar_index = current_bar_index
+                result['trade_closed'] = trade.to_dict()
+                result['action'] = 'position_closed_time_exit'
+                result['position_closed'] = {
+                    'exit_price': trade.exit_price,
+                    'side': trade.side,
+                    'exit_reason': 'time_exit',
+                    'pnl_pct': trade.pnl_pct,
+                    'pnl_dollars': trade.pnl_dollars,
+                    'strategy': trade.strategy,
+                }
+
+            # Adverse flow exit if L2 pressure flips against the position.
+            if session.active_position:
+                should_exit_adverse, adverse_metrics = self._should_adverse_flow_exit(
+                    session,
+                    session.active_position,
+                    current_bar_index,
+                )
+                if should_exit_adverse:
+                    trade = self._close_position(
+                        session,
+                        bar.close,
+                        timestamp,
+                        "adverse_flow",
+                        bar_volume=bar.volume,
+                    )
+                    session.last_exit_bar_index = current_bar_index
+                    result['trade_closed'] = trade.to_dict()
+                    result['action'] = 'position_closed_adverse_flow'
+                    result['position_closed'] = {
+                        'exit_price': trade.exit_price,
+                        'side': trade.side,
+                        'exit_reason': 'adverse_flow',
+                        'pnl_pct': trade.pnl_pct,
+                        'pnl_dollars': trade.pnl_dollars,
+                        'strategy': trade.strategy,
+                    }
+                    result['adverse_flow'] = adverse_metrics
 
             # Trailing stop updates are based on close and become effective next bar.
             if session.active_position:
@@ -1632,7 +1947,13 @@ class DayTradingManager:
         
         if current_pnl < -self.max_daily_loss:
              if session.active_position:
-                 trade = self._close_position(session, current_price, timestamp, "max_daily_loss")
+                 trade = self._close_position(
+                     session,
+                     current_price,
+                     timestamp,
+                     "max_daily_loss",
+                     bar_volume=bar.volume,
+                 )
                  result['trade_closed'] = trade.to_dict()
                  result['action'] = 'max_loss_stop'
                  result['position_closed'] = {
@@ -1710,6 +2031,8 @@ class DayTradingManager:
                 return self._generate_signal(session, bar, timestamp)
 
             ml_engine = session.multi_layer or self.multi_layer
+            if flow_metrics.get("has_l2_coverage", False):
+                ml_engine.strategy_weight = 1.0
             decision = ml_engine.evaluate(
                 ohlcv=ohlcv,
                 indicators=indicators,
@@ -1736,6 +2059,10 @@ class DayTradingManager:
                 'pattern_weight': round(ml_engine.pattern_weight, 3),
                 'strategy_weight': round(ml_engine.strategy_weight, 3),
                 'flow_score': round(float(flow_metrics.get('flow_score', 0.0) or 0.0), 1),
+                'book_pressure_avg': round(float(flow_metrics.get('book_pressure_avg', 0.0) or 0.0), 3),
+                'book_pressure_trend': round(float(flow_metrics.get('book_pressure_trend', 0.0) or 0.0), 3),
+                'large_trader_activity': round(float(flow_metrics.get('large_trader_activity', 0.0) or 0.0), 3),
+                'vwap_execution_flow': round(float(flow_metrics.get('vwap_execution_flow', 0.0) or 0.0), 3),
                 'micro_regime': session.micro_regime,
                 'passed': decision.execute,
             }
@@ -1825,6 +2152,18 @@ class DayTradingManager:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _bar_has_l2_data(bar: BarData) -> bool:
+        return (
+            bar.l2_delta is not None
+            or bar.l2_imbalance is not None
+            or bar.l2_volume is not None
+            or bar.l2_book_pressure is not None
+            or bar.l2_bid_depth_total is not None
+            or bar.l2_ask_depth_total is not None
+            or bar.l2_iceberg_bias is not None
+        )
 
     def _passes_l2_confirmation(self, session: TradingSession, signal: Signal) -> tuple[bool, Dict[str, Any]]:
         """
@@ -2158,6 +2497,293 @@ class DayTradingManager:
         indicators['order_flow'] = self._calculate_order_flow_metrics(bars, lookback=min(24, len(bars)))
         
         return indicators
+
+    def _calculate_position_size(
+        self,
+        session: TradingSession,
+        signal: Signal,
+        entry_price: float,
+    ) -> float:
+        """
+        Volatility/risk-aware position sizing.
+
+        Uses both risk-to-stop and max-notional caps:
+        - risk budget = account * risk_per_trade_pct
+        - size by risk = risk_budget / stop_distance
+        - size by notional = account * max_position_notional_pct / entry_price
+        """
+        if entry_price <= 0:
+            return 0.0
+
+        capital = max(0.0, float(session.account_size_usd))
+        if capital <= 0:
+            return 0.0
+
+        risk_budget = capital * (max(0.1, float(session.risk_per_trade_pct)) / 100.0)
+        flow_confidence_factor = max(0.5, min(1.5, float(signal.confidence) / 80.0))
+        risk_budget *= flow_confidence_factor
+        max_notional = capital * (max(1.0, float(session.max_position_notional_pct)) / 100.0)
+        size_by_notional = max_notional / entry_price
+
+        stop_distance = 0.0
+        if signal.stop_loss and signal.stop_loss > 0:
+            stop_distance = abs(entry_price - float(signal.stop_loss))
+        if stop_distance <= 0:
+            # Fallback: 0.5% synthetic stop distance when strategy did not provide stop.
+            stop_distance = max(entry_price * 0.005, 0.01)
+
+        size_by_risk = risk_budget / stop_distance
+        desired_size = min(size_by_notional, size_by_risk)
+        if desired_size <= 0:
+            return 0.0
+
+        min_size = max(0.0, float(session.min_position_size))
+        if desired_size < min_size and size_by_notional >= min_size:
+            desired_size = min_size
+        return round(max(0.0, desired_size), 4)
+
+    def _simulate_entry_fill(
+        self,
+        desired_size: float,
+        bar_volume: float,
+        session: TradingSession,
+    ) -> Tuple[float, float]:
+        """
+        Deterministic partial-fill simulation.
+
+        If desired size exceeds max allowed participation on this bar, reduce fill size.
+        """
+        if desired_size <= 0:
+            return 0.0, 0.0
+        if bar_volume <= 0:
+            return desired_size, 1.0
+
+        max_participation = min(1.0, max(0.01, float(session.max_fill_participation_rate)))
+        max_fillable = bar_volume * max_participation
+        if desired_size <= max_fillable:
+            return desired_size, 1.0
+
+        raw_ratio = max_fillable / desired_size if desired_size > 0 else 0.0
+        min_ratio = min(1.0, max(0.01, float(session.min_fill_ratio)))
+        fill_ratio = min(1.0, max(min_ratio, raw_ratio))
+        return round(desired_size * fill_ratio, 4), round(fill_ratio, 4)
+
+    def _bars_held(self, pos: Position, current_bar_index: int) -> int:
+        entry_index = pos.entry_bar_index if pos.entry_bar_index is not None else current_bar_index
+        return max(0, int(current_bar_index) - int(entry_index))
+
+    def _partial_take_profit_price(self, session: TradingSession, pos: Position) -> float:
+        if pos.stop_loss <= 0:
+            return 0.0
+        rr = max(0.25, float(session.partial_take_profit_rr))
+        risk = abs(pos.entry_price - pos.stop_loss)
+        if risk <= 0:
+            return 0.0
+        if pos.side == "long":
+            return pos.entry_price + (risk * rr)
+        return pos.entry_price - (risk * rr)
+
+    def _build_trade_record(
+        self,
+        session: TradingSession,
+        pos: Position,
+        exit_price: float,
+        exit_time: datetime,
+        reason: str,
+        shares: float,
+        bar_volume: Optional[float] = None,
+    ) -> DayTrade:
+        shares = max(0.0, float(shares))
+        if shares <= 0:
+            raise ValueError("shares must be > 0 when building trade record")
+
+        if pos.side == 'long':
+            gross_pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100
+        else:
+            gross_pnl_pct = (pos.entry_price - exit_price) / pos.entry_price * 100
+
+        gross_pnl_dollars = gross_pnl_pct * pos.entry_price / 100 * shares
+
+        costs = self.trading_costs.calculate_costs(
+            entry_price=pos.entry_price,
+            exit_price=exit_price,
+            shares=shares,
+            side=pos.side,
+            avg_bar_volume=bar_volume,
+        )
+
+        net_pnl_dollars = gross_pnl_dollars - costs['total']
+        notional = pos.entry_price * shares
+        net_pnl_pct = (net_pnl_dollars / notional * 100) if notional > 0 else 0.0
+
+        session.trade_counter += 1
+        signal_metadata = pos.signal_metadata if isinstance(pos.signal_metadata, dict) else {}
+        order_flow_md = signal_metadata.get("order_flow") if isinstance(signal_metadata, dict) else {}
+        if not isinstance(order_flow_md, dict):
+            order_flow_md = {}
+
+        flow_snapshot: Dict[str, Any] = {}
+        for key in (
+            "signed_aggression",
+            "directional_consistency",
+            "imbalance_avg",
+            "sweep_intensity",
+            "book_pressure_avg",
+            "book_pressure_trend",
+            "absorption_rate",
+            "delta_price_divergence",
+            "delta_zscore",
+            "price_change_pct",
+            "delta_acceleration",
+        ):
+            if key in order_flow_md:
+                flow_snapshot[key] = self._to_float(order_flow_md.get(key), 0.0)
+
+        l2_md = signal_metadata.get("l2_confirmation") if isinstance(signal_metadata, dict) else None
+        if isinstance(l2_md, dict):
+            flow_snapshot["l2_confirmation_passed"] = bool(l2_md.get("passed", False))
+
+        trade = DayTrade(
+            id=session.trade_counter,
+            strategy=pos.strategy_name,
+            side=pos.side,
+            entry_price=pos.entry_price,
+            entry_time=pos.entry_time,
+            exit_price=exit_price,
+            exit_time=exit_time,
+            size=shares,
+            pnl_pct=net_pnl_pct,
+            pnl_dollars=net_pnl_dollars,
+            exit_reason=reason,
+            slippage=costs.get('slippage', 0.0),
+            commission=costs.get('commission', 0.0),
+            reg_fee=costs.get('reg_fee', 0.0),
+            sec_fee=costs.get('sec_fee', 0.0),
+            finra_fee=costs.get('finra_fee', 0.0),
+            market_impact=costs.get('market_impact', 0.0),
+            total_costs=costs.get('total', 0.0),
+            gross_pnl_pct=gross_pnl_pct,
+            signal_bar_index=pos.signal_bar_index,
+            entry_bar_index=pos.entry_bar_index,
+            signal_timestamp=pos.signal_timestamp,
+            signal_price=pos.signal_price,
+            signal_metadata=signal_metadata,
+            flow_snapshot=flow_snapshot,
+        )
+        session.trades.append(trade)
+        session.total_pnl += net_pnl_pct
+        return trade
+
+    def _maybe_take_partial_profit(
+        self,
+        session: TradingSession,
+        pos: Position,
+        bar: BarData,
+        timestamp: datetime,
+    ) -> Optional[DayTrade]:
+        if not session.enable_partial_take_profit:
+            return None
+        if pos.partial_exit_done or pos.size <= 0:
+            return None
+        if pos.stop_loss <= 0:
+            return None
+
+        partial_price = pos.partial_take_profit_price or self._partial_take_profit_price(session, pos)
+        if partial_price <= 0:
+            return None
+        pos.partial_take_profit_price = partial_price
+
+        hit_rr_target = (bar.high >= partial_price) if pos.side == "long" else (bar.low <= partial_price)
+
+        flow = self._calculate_order_flow_metrics(session.bars, lookback=min(8, len(session.bars)))
+        signed_aggression = float(flow.get("signed_aggression", 0.0) or 0.0)
+        if pos.side == "long":
+            flow_deteriorating = signed_aggression < 0.0 and bar.close > pos.entry_price
+        else:
+            flow_deteriorating = signed_aggression > 0.0 and bar.close < pos.entry_price
+
+        if not hit_rr_target and not flow_deteriorating:
+            return None
+
+        close_fraction = 0.5 if flow_deteriorating and not hit_rr_target else float(session.partial_take_profit_fraction)
+        close_fraction = min(0.95, max(0.05, close_fraction))
+        close_size = max(0.0, min(pos.size, pos.size * close_fraction))
+        if close_size <= 0:
+            return None
+
+        reason = "partial_take_profit"
+        if flow_deteriorating and not hit_rr_target:
+            reason = "partial_take_profit_flow_deterioration"
+
+        trade = self._build_trade_record(
+            session=session,
+            pos=pos,
+            exit_price=(bar.close if flow_deteriorating and not hit_rr_target else partial_price),
+            exit_time=timestamp,
+            reason=reason,
+            shares=close_size,
+            bar_volume=bar.volume,
+        )
+        pos.size = max(0.0, pos.size - close_size)
+        pos.partial_exit_done = True
+
+        # After partial, protect remaining position at breakeven or better.
+        if pos.side == "long":
+            pos.stop_loss = max(pos.stop_loss, pos.entry_price)
+        else:
+            pos.stop_loss = min(pos.stop_loss, pos.entry_price) if pos.stop_loss > 0 else pos.entry_price
+
+        if pos.size <= 0:
+            session.active_position = None
+        return trade
+
+    def _should_time_exit(self, session: TradingSession, pos: Position, current_bar_index: int) -> bool:
+        if session.time_exit_bars <= 0:
+            return False
+        limit_bars = float(session.time_exit_bars)
+        flow = self._calculate_order_flow_metrics(session.bars, lookback=min(8, len(session.bars)))
+        signed_aggression = float(flow.get("signed_aggression", 0.0) or 0.0)
+        favorable = (
+            (pos.side == "long" and signed_aggression >= 0.10)
+            or (pos.side == "short" and signed_aggression <= -0.10)
+        )
+        if favorable:
+            limit_bars *= 1.5
+        return self._bars_held(pos, current_bar_index) >= int(limit_bars)
+
+    def _should_adverse_flow_exit(
+        self,
+        session: TradingSession,
+        pos: Position,
+        current_bar_index: int,
+    ) -> Tuple[bool, Dict[str, float]]:
+        metrics = {"signed_aggression": 0.0, "directional_consistency": 0.0, "book_pressure_avg": 0.0}
+        if not session.adverse_flow_exit_enabled:
+            return False, metrics
+        if self._bars_held(pos, current_bar_index) < int(session.adverse_flow_min_hold_bars):
+            return False, metrics
+
+        flow = self._calculate_order_flow_metrics(session.bars, lookback=min(12, len(session.bars)))
+        if not flow.get("has_l2_coverage", False):
+            return False, metrics
+
+        signed = float(flow.get("signed_aggression", 0.0) or 0.0)
+        consistency = float(flow.get("directional_consistency", 0.0) or 0.0)
+        book_pressure_avg = float(flow.get("book_pressure_avg", 0.0) or 0.0)
+        threshold = max(0.02, float(session.adverse_flow_threshold))
+        metrics = {
+            "signed_aggression": signed,
+            "directional_consistency": consistency,
+            "book_pressure_avg": book_pressure_avg,
+        }
+
+        if pos.side == "long":
+            adverse_flow = signed <= -threshold and consistency >= 0.45
+            adverse_book = book_pressure_avg <= -0.15
+            return (adverse_flow or adverse_book), metrics
+        adverse_flow = signed >= threshold and consistency >= 0.45
+        adverse_book = book_pressure_avg >= 0.15
+        return (adverse_flow or adverse_book), metrics
     
     def _open_position(
         self,
@@ -2167,27 +2793,32 @@ class DayTradingManager:
         entry_time: Optional[datetime] = None,
         signal_bar_index: Optional[int] = None,
         entry_bar_index: Optional[int] = None,
+        entry_bar_volume: Optional[float] = None,
     ) -> Position:
         """Open a new position from signal."""
         side = 'long' if signal.signal_type == SignalType.BUY else 'short'
         fill_price = float(entry_price if entry_price is not None else signal.price)
         fill_time = entry_time or signal.timestamp
-        capital_usd = max(0.0, session.account_size_usd)
-        size = round(capital_usd / fill_price, 4) if fill_price > 0 else 0.0
-        if size <= 0:
-            size = 0.0
+        desired_size = self._calculate_position_size(session, signal, fill_price)
+        size, fill_ratio = self._simulate_entry_fill(
+            desired_size=desired_size,
+            bar_volume=max(0.0, float(entry_bar_volume or 0.0)),
+            session=session,
+        )
         
         position = Position(
             strategy_name=signal.strategy_name,
             entry_price=fill_price,
             entry_time=fill_time,
             side=side,
-            size=size,  # Full notional allocation
+            size=size,
             stop_loss=signal.stop_loss or 0,
             take_profit=signal.take_profit or 0,
             trailing_stop_active=signal.trailing_stop,
             highest_price=fill_price if side == 'long' else 0,
-            lowest_price=fill_price if side == 'short' else float('inf')
+            lowest_price=fill_price if side == 'short' else float('inf'),
+            fill_ratio=fill_ratio,
+            initial_size=size,
         )
         # Optional audit metadata (keeps backwards compatibility).
         if signal_bar_index is not None:
@@ -2196,6 +2827,13 @@ class DayTradingManager:
             position.entry_bar_index = entry_bar_index
         position.signal_timestamp = signal.timestamp.isoformat()
         position.signal_price = signal.price
+        signal_metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        try:
+            position.signal_metadata = json.loads(json.dumps(signal_metadata, default=str))
+        except Exception:
+            position.signal_metadata = dict(signal_metadata)
+        if session.enable_partial_take_profit and position.stop_loss > 0:
+            position.partial_take_profit_price = self._partial_take_profit_price(session, position)
         
         session.active_position = position
         session.trailing_stop_pct = signal.trailing_stop_pct or 0.8
@@ -2207,61 +2845,20 @@ class DayTradingManager:
         session: TradingSession, 
         exit_price: float, 
         exit_time: datetime, 
-        reason: str
+        reason: str,
+        bar_volume: Optional[float] = None,
     ) -> DayTrade:
         """Close position and record trade with trading costs."""
         pos = session.active_position
-        
-        # Calculate gross PnL (before costs)
-        if pos.side == 'long':
-            gross_pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100
-        else:
-            gross_pnl_pct = (pos.entry_price - exit_price) / pos.entry_price * 100
-        
-        gross_pnl_dollars = gross_pnl_pct * pos.entry_price / 100 * pos.size
-        
-        # Calculate trading costs
-        costs = self.trading_costs.calculate_costs(
-            entry_price=pos.entry_price,
-            exit_price=exit_price,
-            shares=pos.size,
-            side=pos.side
-        )
-        
-        # Net PnL after costs
-        net_pnl_dollars = gross_pnl_dollars - costs['total']
-        notional = pos.entry_price * pos.size
-        net_pnl_pct = (net_pnl_dollars / notional * 100) if notional > 0 else 0.0
-        
-        session.trade_counter += 1
-        trade = DayTrade(
-            id=session.trade_counter,
-            strategy=pos.strategy_name,
-            side=pos.side,
-            entry_price=pos.entry_price,
-            entry_time=pos.entry_time,
+        trade = self._build_trade_record(
+            session=session,
+            pos=pos,
             exit_price=exit_price,
             exit_time=exit_time,
-            size=pos.size,
-            pnl_pct=net_pnl_pct,
-            pnl_dollars=net_pnl_dollars,
-            exit_reason=reason,
-            # Cost breakdown
-            slippage=costs.get('slippage', 0.0),
-            commission=costs.get('commission', 0.0),
-            reg_fee=costs.get('reg_fee', 0.0),
-            sec_fee=costs.get('sec_fee', 0.0),
-            finra_fee=costs.get('finra_fee', 0.0),
-            total_costs=costs.get('total', 0.0),
-            gross_pnl_pct=gross_pnl_pct,
-            signal_bar_index=getattr(pos, "signal_bar_index", None),
-            entry_bar_index=getattr(pos, "entry_bar_index", None),
-            signal_timestamp=getattr(pos, "signal_timestamp", None),
-            signal_price=getattr(pos, "signal_price", None),
+            reason=reason,
+            shares=pos.size,
+            bar_volume=bar_volume,
         )
-        
-        session.trades.append(trade)
-        session.total_pnl += net_pnl_pct
         session.active_position = None
         
         return trade
@@ -2322,7 +2919,13 @@ class DayTradingManager:
         if session.active_position and session.bars:
             last_price = session.bars[-1].close
             last_time = session.bars[-1].timestamp
-            self._close_position(session, last_price, last_time, 'manual_close')
+            self._close_position(
+                session,
+                last_price,
+                last_time,
+                'manual_close',
+                bar_volume=session.bars[-1].volume,
+            )
         
         session.phase = SessionPhase.CLOSED
         if session.bars:

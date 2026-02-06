@@ -18,6 +18,7 @@ class ExhaustionFadeStrategy(BaseStrategy):
         min_divergence: float = 0.20,
         min_delta_zscore: float = 1.4,
         max_sweep_intensity: float = 0.8,
+        min_book_pressure: float = 0.0,
         min_confidence: float = 63.0,
         atr_stop_multiplier: float = 1.3,
         rr_ratio: float = 1.7,
@@ -25,12 +26,13 @@ class ExhaustionFadeStrategy(BaseStrategy):
     ):
         super().__init__(
             name="ExhaustionFade",
-            regimes=[Regime.CHOPPY, Regime.MIXED],
+            regimes=[Regime.TRENDING, Regime.CHOPPY, Regime.MIXED],
         )
         self.min_absorption_rate = min_absorption_rate
         self.min_divergence = min_divergence
         self.min_delta_zscore = min_delta_zscore
         self.max_sweep_intensity = max_sweep_intensity
+        self.min_book_pressure = min_book_pressure
         self.min_confidence = min_confidence
         self.atr_stop_multiplier = atr_stop_multiplier
         self.rr_ratio = rr_ratio
@@ -62,6 +64,7 @@ class ExhaustionFadeStrategy(BaseStrategy):
         delta_z = float(flow.get("delta_zscore", 0.0) or 0.0)
         sweep_intensity = float(flow.get("sweep_intensity", 0.0) or 0.0)
         signed_aggr = float(flow.get("signed_aggression", 0.0) or 0.0)
+        book_pressure = float(flow.get("book_pressure_avg", 0.0) or 0.0)
         price_change_pct = float(flow.get("price_change_pct", 0.0) or 0.0)
 
         atr_series = indicators.get("atr") or []
@@ -73,6 +76,7 @@ class ExhaustionFadeStrategy(BaseStrategy):
             and divergence >= self.min_divergence
             and absorption >= self.min_absorption_rate
             and signed_aggr <= -0.04
+            and book_pressure >= self.min_book_pressure
             and sweep_intensity <= self.max_sweep_intensity
             and price_change_pct <= 0.0
         )
@@ -82,6 +86,7 @@ class ExhaustionFadeStrategy(BaseStrategy):
             and divergence <= -self.min_divergence
             and absorption >= self.min_absorption_rate
             and signed_aggr >= 0.04
+            and book_pressure <= -self.min_book_pressure
             and sweep_intensity <= self.max_sweep_intensity
             and price_change_pct >= 0.0
         )
@@ -92,11 +97,15 @@ class ExhaustionFadeStrategy(BaseStrategy):
         divergence_score = self._clamp01(abs(divergence) / max(self.min_divergence * 2.0, 1e-6))
         absorption_score = self._clamp01(absorption / max(self.min_absorption_rate, 1e-6))
         sweep_penalty = self._clamp01(sweep_intensity / max(self.max_sweep_intensity, 1e-6))
+        book_score = self._clamp01(
+            abs(book_pressure) / max(max(self.min_book_pressure, 0.02) * 3.0, 1e-6)
+        )
         confidence = 100.0 * (
-            0.34 * exhaustion_score
-            + 0.30 * divergence_score
-            + 0.26 * absorption_score
+            0.30 * exhaustion_score
+            + 0.26 * divergence_score
+            + 0.20 * absorption_score
             + 0.10 * (1.0 - sweep_penalty)
+            + 0.14 * book_score
         )
         if confidence < self.min_confidence:
             return None
@@ -129,7 +138,7 @@ class ExhaustionFadeStrategy(BaseStrategy):
             reasoning=(
                 f"Exhaustion {direction_label}: delta_z {delta_z:+.2f}, "
                 f"divergence {divergence:+.2f}, absorption {absorption:.2f}, "
-                f"sweep {sweep_intensity:.2f}"
+                f"sweep {sweep_intensity:.2f}, book {book_pressure:+.2f}"
             ),
             metadata={
                 "order_flow": {
@@ -137,6 +146,7 @@ class ExhaustionFadeStrategy(BaseStrategy):
                     "delta_price_divergence": divergence,
                     "delta_zscore": delta_z,
                     "signed_aggression": signed_aggr,
+                    "book_pressure_avg": book_pressure,
                     "sweep_intensity": sweep_intensity,
                     "price_change_pct": price_change_pct,
                 }
@@ -153,6 +163,7 @@ class ExhaustionFadeStrategy(BaseStrategy):
                 "min_divergence": self.min_divergence,
                 "min_delta_zscore": self.min_delta_zscore,
                 "max_sweep_intensity": self.max_sweep_intensity,
+                "min_book_pressure": self.min_book_pressure,
                 "min_confidence": self.min_confidence,
                 "atr_stop_multiplier": self.atr_stop_multiplier,
                 "rr_ratio": self.rr_ratio,
@@ -160,4 +171,3 @@ class ExhaustionFadeStrategy(BaseStrategy):
             }
         )
         return base
-

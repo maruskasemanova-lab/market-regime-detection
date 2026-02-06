@@ -69,6 +69,15 @@ class Position:
     lowest_price: float = float('inf')  # For trailing short
     pnl: float = 0.0
     status: str = 'open'  # 'open', 'closed', 'stopped'
+    fill_ratio: float = 1.0
+    initial_size: float = 0.0
+    partial_exit_done: bool = False
+    partial_take_profit_price: float = 0.0
+    signal_bar_index: Optional[int] = None
+    entry_bar_index: Optional[int] = None
+    signal_timestamp: Optional[str] = None
+    signal_price: Optional[float] = None
+    signal_metadata: Dict[str, Any] = field(default_factory=dict)
     
     def update_trailing_stop(self, current_price: float, trailing_pct: float):
         """Update trailing stop based on price movement."""
@@ -129,8 +138,18 @@ class Position:
             'trailing_stop_active': self.trailing_stop_active,
             'trailing_stop_price': self.trailing_stop_price,
             'highest_price': self.highest_price,
+            'lowest_price': self.lowest_price,
             'pnl': round(self.pnl, 2),
-            'status': self.status
+            'status': self.status,
+            'fill_ratio': self.fill_ratio,
+            'initial_size': self.initial_size if self.initial_size else self.size,
+            'partial_exit_done': self.partial_exit_done,
+            'partial_take_profit_price': self.partial_take_profit_price,
+            'signal_bar_index': self.signal_bar_index,
+            'entry_bar_index': self.entry_bar_index,
+            'signal_timestamp': self.signal_timestamp,
+            'signal_price': self.signal_price,
+            'signal_metadata': self.signal_metadata,
         }
 
 

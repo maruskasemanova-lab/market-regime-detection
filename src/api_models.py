@@ -42,6 +42,10 @@ class BarInput(BaseModel):
     l2_sell_volume: Optional[float] = None
     l2_volume: Optional[float] = None
     l2_imbalance: Optional[float] = None
+    l2_bid_depth_total: Optional[float] = None
+    l2_ask_depth_total: Optional[float] = None
+    l2_book_pressure: Optional[float] = None
+    l2_book_pressure_change: Optional[float] = None
     l2_iceberg_buy_count: Optional[float] = None
     l2_iceberg_sell_count: Optional[float] = None
     l2_iceberg_bias: Optional[float] = None
@@ -64,6 +68,17 @@ class TradingConfig(BaseModel):
     max_trades_per_day: int = 3
     trade_cooldown_bars: int = 15
     account_size_usd: float = 10000.0
+    risk_per_trade_pct: float = 1.0
+    max_position_notional_pct: float = 100.0
+    max_fill_participation_rate: float = 0.20
+    min_fill_ratio: float = 0.35
+    enable_partial_take_profit: bool = True
+    partial_take_profit_rr: float = 1.0
+    partial_take_profit_fraction: float = 0.5
+    time_exit_bars: int = 40
+    adverse_flow_exit_enabled: bool = True
+    adverse_flow_threshold: float = 0.12
+    adverse_flow_min_hold_bars: int = 3
 
 
 class MultiLayerConfig(BaseModel):
@@ -79,4 +94,3 @@ class MultiLayerConfig(BaseModel):
     engulfing_min_body_pct: Optional[float] = None
     volume_confirm_ratio: Optional[float] = None
     vwap_proximity_pct: Optional[float] = None
-

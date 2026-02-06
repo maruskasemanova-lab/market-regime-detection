@@ -269,6 +269,10 @@ async def process_bar(bar: BarInput):
         'l2_sell_volume': bar.l2_sell_volume,
         'l2_volume': bar.l2_volume,
         'l2_imbalance': bar.l2_imbalance,
+        'l2_bid_depth_total': bar.l2_bid_depth_total,
+        'l2_ask_depth_total': bar.l2_ask_depth_total,
+        'l2_book_pressure': bar.l2_book_pressure,
+        'l2_book_pressure_change': bar.l2_book_pressure_change,
         'l2_iceberg_buy_count': bar.l2_iceberg_buy_count,
         'l2_iceberg_sell_count': bar.l2_iceberg_sell_count,
         'l2_iceberg_bias': bar.l2_iceberg_bias,
@@ -365,6 +369,17 @@ async def get_trading_config():
         "max_daily_loss": day_trading_manager.max_daily_loss,
         "max_trades_per_day": day_trading_manager.max_trades_per_day,
         "trade_cooldown_bars": day_trading_manager.trade_cooldown_bars,
+        "risk_per_trade_pct": day_trading_manager.risk_per_trade_pct,
+        "max_position_notional_pct": day_trading_manager.max_position_notional_pct,
+        "max_fill_participation_rate": day_trading_manager.max_fill_participation_rate,
+        "min_fill_ratio": day_trading_manager.min_fill_ratio,
+        "time_exit_bars": day_trading_manager.time_exit_bars,
+        "enable_partial_take_profit": day_trading_manager.enable_partial_take_profit,
+        "partial_take_profit_rr": day_trading_manager.partial_take_profit_rr,
+        "partial_take_profit_fraction": day_trading_manager.partial_take_profit_fraction,
+        "adverse_flow_exit_enabled": day_trading_manager.adverse_flow_exit_enabled,
+        "adverse_flow_threshold": day_trading_manager.adverse_flow_exit_threshold,
+        "adverse_flow_min_hold_bars": day_trading_manager.adverse_flow_min_hold_bars,
     }
 
 
@@ -376,6 +391,21 @@ async def update_trading_config(config: TradingConfig):
     day_trading_manager.max_daily_loss = config.max_daily_loss
     day_trading_manager.max_trades_per_day = config.max_trades_per_day
     day_trading_manager.trade_cooldown_bars = config.trade_cooldown_bars
+    day_trading_manager.risk_per_trade_pct = max(0.1, float(config.risk_per_trade_pct))
+    day_trading_manager.max_position_notional_pct = max(1.0, float(config.max_position_notional_pct))
+    day_trading_manager.max_fill_participation_rate = min(
+        1.0, max(0.01, float(config.max_fill_participation_rate))
+    )
+    day_trading_manager.min_fill_ratio = min(1.0, max(0.01, float(config.min_fill_ratio)))
+    day_trading_manager.time_exit_bars = max(1, int(config.time_exit_bars))
+    day_trading_manager.enable_partial_take_profit = bool(config.enable_partial_take_profit)
+    day_trading_manager.partial_take_profit_rr = max(0.25, float(config.partial_take_profit_rr))
+    day_trading_manager.partial_take_profit_fraction = min(
+        0.95, max(0.05, float(config.partial_take_profit_fraction))
+    )
+    day_trading_manager.adverse_flow_exit_enabled = bool(config.adverse_flow_exit_enabled)
+    day_trading_manager.adverse_flow_exit_threshold = max(0.02, float(config.adverse_flow_threshold))
+    day_trading_manager.adverse_flow_min_hold_bars = max(1, int(config.adverse_flow_min_hold_bars))
     
     return {
         "message": "Trading configuration updated",
@@ -385,6 +415,17 @@ async def update_trading_config(config: TradingConfig):
             "max_daily_loss": config.max_daily_loss,
             "max_trades_per_day": config.max_trades_per_day,
             "trade_cooldown_bars": config.trade_cooldown_bars,
+            "risk_per_trade_pct": day_trading_manager.risk_per_trade_pct,
+            "max_position_notional_pct": day_trading_manager.max_position_notional_pct,
+            "max_fill_participation_rate": day_trading_manager.max_fill_participation_rate,
+            "min_fill_ratio": day_trading_manager.min_fill_ratio,
+            "time_exit_bars": day_trading_manager.time_exit_bars,
+            "enable_partial_take_profit": day_trading_manager.enable_partial_take_profit,
+            "partial_take_profit_rr": day_trading_manager.partial_take_profit_rr,
+            "partial_take_profit_fraction": day_trading_manager.partial_take_profit_fraction,
+            "adverse_flow_exit_enabled": day_trading_manager.adverse_flow_exit_enabled,
+            "adverse_flow_threshold": day_trading_manager.adverse_flow_exit_threshold,
+            "adverse_flow_min_hold_bars": day_trading_manager.adverse_flow_min_hold_bars,
         }
     }
 
@@ -397,6 +438,17 @@ async def configure_session(
     regime_detection_minutes: int = 15,
     regime_refresh_bars: int = 12,
     account_size_usd: float = 10_000.0,
+    risk_per_trade_pct: float = 1.0,
+    max_position_notional_pct: float = 100.0,
+    max_fill_participation_rate: float = 0.20,
+    min_fill_ratio: float = 0.35,
+    enable_partial_take_profit: bool = True,
+    partial_take_profit_rr: float = 1.0,
+    partial_take_profit_fraction: float = 0.5,
+    time_exit_bars: int = 40,
+    adverse_flow_exit_enabled: bool = True,
+    adverse_flow_threshold: float = 0.12,
+    adverse_flow_min_hold_bars: int = 3,
     l2_confirm_enabled: bool = False,
     l2_min_delta: float = 0.0,
     l2_min_imbalance: float = 0.0,
@@ -417,12 +469,36 @@ async def configure_session(
     session.regime_refresh_bars = max(3, int(regime_refresh_bars))
     day_trading_manager.regime_refresh_bars = max(3, int(regime_refresh_bars))
     session.account_size_usd = account_size_usd
+    session.risk_per_trade_pct = max(0.1, float(risk_per_trade_pct))
+    session.max_position_notional_pct = max(1.0, float(max_position_notional_pct))
+    session.max_fill_participation_rate = min(1.0, max(0.01, float(max_fill_participation_rate)))
+    session.min_fill_ratio = min(1.0, max(0.01, float(min_fill_ratio)))
+    day_trading_manager.max_fill_participation_rate = session.max_fill_participation_rate
+    day_trading_manager.min_fill_ratio = session.min_fill_ratio
+    session.enable_partial_take_profit = bool(enable_partial_take_profit)
+    session.partial_take_profit_rr = max(0.25, float(partial_take_profit_rr))
+    session.partial_take_profit_fraction = min(0.95, max(0.05, float(partial_take_profit_fraction)))
+    session.time_exit_bars = max(1, int(time_exit_bars))
+    session.adverse_flow_exit_enabled = bool(adverse_flow_exit_enabled)
+    session.adverse_flow_threshold = max(0.02, float(adverse_flow_threshold))
+    session.adverse_flow_min_hold_bars = max(1, int(adverse_flow_min_hold_bars))
     day_trading_manager.set_run_defaults(
         run_id=run_id,
         ticker=ticker,
         regime_detection_minutes=regime_detection_minutes,
         regime_refresh_bars=regime_refresh_bars,
         account_size_usd=account_size_usd,
+        risk_per_trade_pct=risk_per_trade_pct,
+        max_position_notional_pct=max_position_notional_pct,
+        max_fill_participation_rate=max_fill_participation_rate,
+        min_fill_ratio=min_fill_ratio,
+        enable_partial_take_profit=enable_partial_take_profit,
+        partial_take_profit_rr=partial_take_profit_rr,
+        partial_take_profit_fraction=partial_take_profit_fraction,
+        time_exit_bars=time_exit_bars,
+        adverse_flow_exit_enabled=adverse_flow_exit_enabled,
+        adverse_flow_threshold=adverse_flow_threshold,
+        adverse_flow_min_hold_bars=adverse_flow_min_hold_bars,
         l2_confirm_enabled=l2_confirm_enabled,
         l2_min_delta=l2_min_delta,
         l2_min_imbalance=l2_min_imbalance,

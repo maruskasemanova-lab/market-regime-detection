@@ -18,6 +18,7 @@ class AbsorptionReversalStrategy(BaseStrategy):
         min_absorption_rate: float = 0.55,
         min_divergence: float = 0.15,
         min_signed_aggression: float = 0.08,
+        min_book_pressure: float = 0.05,
         min_price_extension_pct: float = 0.12,
         min_confidence: float = 62.0,
         atr_stop_multiplier: float = 1.4,
@@ -26,11 +27,12 @@ class AbsorptionReversalStrategy(BaseStrategy):
     ):
         super().__init__(
             name="AbsorptionReversal",
-            regimes=[Regime.CHOPPY, Regime.MIXED],
+            regimes=[Regime.TRENDING, Regime.CHOPPY, Regime.MIXED],
         )
         self.min_absorption_rate = min_absorption_rate
         self.min_divergence = min_divergence
         self.min_signed_aggression = min_signed_aggression
+        self.min_book_pressure = min_book_pressure
         self.min_price_extension_pct = min_price_extension_pct
         self.min_confidence = min_confidence
         self.atr_stop_multiplier = atr_stop_multiplier
@@ -61,6 +63,7 @@ class AbsorptionReversalStrategy(BaseStrategy):
         absorption = float(flow.get("absorption_rate", 0.0) or 0.0)
         divergence = float(flow.get("delta_price_divergence", 0.0) or 0.0)
         signed_aggr = float(flow.get("signed_aggression", 0.0) or 0.0)
+        book_pressure = float(flow.get("book_pressure_avg", 0.0) or 0.0)
         price_extension = float(flow.get("price_change_pct", 0.0) or 0.0)
         imbalance = float(flow.get("imbalance_avg", 0.0) or 0.0)
         consistency = float(flow.get("directional_consistency", 0.0) or 0.0)
@@ -74,6 +77,7 @@ class AbsorptionReversalStrategy(BaseStrategy):
             and absorption >= self.min_absorption_rate
             and divergence >= self.min_divergence
             and signed_aggr <= -self.min_signed_aggression
+            and book_pressure >= self.min_book_pressure
             and imbalance >= -0.05
         )
         # SELL: aggressive buying got absorbed and upside extension stalls.
@@ -82,6 +86,7 @@ class AbsorptionReversalStrategy(BaseStrategy):
             and absorption >= self.min_absorption_rate
             and divergence <= -self.min_divergence
             and signed_aggr >= self.min_signed_aggression
+            and book_pressure <= -self.min_book_pressure
             and imbalance <= 0.05
         )
 
@@ -92,11 +97,13 @@ class AbsorptionReversalStrategy(BaseStrategy):
         divergence_score = self._clamp01(abs(divergence) / max(self.min_divergence * 2.0, 1e-6))
         aggression_score = self._clamp01(abs(signed_aggr) / max(self.min_signed_aggression * 2.0, 1e-6))
         consistency_score = self._clamp01(consistency)
+        book_score = self._clamp01(abs(book_pressure) / max(self.min_book_pressure * 2.0, 1e-6))
         confidence = 100.0 * (
-            0.36 * absorption_score
-            + 0.24 * divergence_score
-            + 0.24 * aggression_score
-            + 0.16 * consistency_score
+            0.30 * absorption_score
+            + 0.22 * divergence_score
+            + 0.22 * aggression_score
+            + 0.10 * consistency_score
+            + 0.16 * book_score
         )
         if confidence < self.min_confidence:
             return None
@@ -128,7 +135,8 @@ class AbsorptionReversalStrategy(BaseStrategy):
             trailing_stop_pct=self.trailing_stop_pct,
             reasoning=(
                 f"Absorption {absorption:.2f}, divergence {divergence:+.2f}, "
-                f"signed aggression {signed_aggr:+.2f}, consistency {consistency:.2f}"
+                f"signed aggression {signed_aggr:+.2f}, book {book_pressure:+.2f}, "
+                f"consistency {consistency:.2f}"
             ),
             metadata={
                 "flow_direction": direction_label,
@@ -136,6 +144,7 @@ class AbsorptionReversalStrategy(BaseStrategy):
                     "absorption_rate": absorption,
                     "delta_price_divergence": divergence,
                     "signed_aggression": signed_aggr,
+                    "book_pressure_avg": book_pressure,
                     "price_change_pct": price_extension,
                     "imbalance_avg": imbalance,
                     "directional_consistency": consistency,
@@ -152,6 +161,7 @@ class AbsorptionReversalStrategy(BaseStrategy):
                 "min_absorption_rate": self.min_absorption_rate,
                 "min_divergence": self.min_divergence,
                 "min_signed_aggression": self.min_signed_aggression,
+                "min_book_pressure": self.min_book_pressure,
                 "min_price_extension_pct": self.min_price_extension_pct,
                 "min_confidence": self.min_confidence,
                 "atr_stop_multiplier": self.atr_stop_multiplier,
@@ -160,4 +170,3 @@ class AbsorptionReversalStrategy(BaseStrategy):
             }
         )
         return base
-
