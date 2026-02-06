@@ -69,6 +69,14 @@ class BarInput(BaseModel):
     close: float
     volume: float
     vwap: Optional[float] = None
+    l2_delta: Optional[float] = None
+    l2_buy_volume: Optional[float] = None
+    l2_sell_volume: Optional[float] = None
+    l2_volume: Optional[float] = None
+    l2_imbalance: Optional[float] = None
+    l2_iceberg_buy_count: Optional[float] = None
+    l2_iceberg_sell_count: Optional[float] = None
+    l2_iceberg_bias: Optional[float] = None
 
 
 class SessionQuery(BaseModel):
@@ -331,7 +339,15 @@ async def process_bar(bar: BarInput):
         'low': bar.low,
         'close': bar.close,
         'volume': bar.volume,
-        'vwap': bar.vwap
+        'vwap': bar.vwap,
+        'l2_delta': bar.l2_delta,
+        'l2_buy_volume': bar.l2_buy_volume,
+        'l2_sell_volume': bar.l2_sell_volume,
+        'l2_volume': bar.l2_volume,
+        'l2_imbalance': bar.l2_imbalance,
+        'l2_iceberg_buy_count': bar.l2_iceberg_buy_count,
+        'l2_iceberg_sell_count': bar.l2_iceberg_sell_count,
+        'l2_iceberg_bias': bar.l2_iceberg_bias,
     }
     
     result = day_trading_manager.process_bar(
@@ -419,6 +435,7 @@ async def clear_session(run_id: str, ticker: str, date: str):
 class TradingConfig(BaseModel):
     """Global trading configuration."""
     regime_detection_minutes: int = 60
+    regime_refresh_bars: int = 12
     max_daily_loss: float = 300.0
     max_trades_per_day: int = 3
     trade_cooldown_bars: int = 15
@@ -430,6 +447,7 @@ async def get_trading_config():
     """Get current global trading configuration."""
     return {
         "regime_detection_minutes": day_trading_manager.regime_detection_minutes,
+        "regime_refresh_bars": day_trading_manager.regime_refresh_bars,
         "max_daily_loss": day_trading_manager.max_daily_loss,
         "max_trades_per_day": day_trading_manager.max_trades_per_day,
         "trade_cooldown_bars": day_trading_manager.trade_cooldown_bars,
@@ -440,6 +458,7 @@ async def get_trading_config():
 async def update_trading_config(config: TradingConfig):
     """Update global trading configuration."""
     day_trading_manager.regime_detection_minutes = config.regime_detection_minutes
+    day_trading_manager.regime_refresh_bars = max(3, int(config.regime_refresh_bars))
     day_trading_manager.max_daily_loss = config.max_daily_loss
     day_trading_manager.max_trades_per_day = config.max_trades_per_day
     day_trading_manager.trade_cooldown_bars = config.trade_cooldown_bars
@@ -448,6 +467,7 @@ async def update_trading_config(config: TradingConfig):
         "message": "Trading configuration updated",
         "config": {
             "regime_detection_minutes": config.regime_detection_minutes,
+            "regime_refresh_bars": day_trading_manager.regime_refresh_bars,
             "max_daily_loss": config.max_daily_loss,
             "max_trades_per_day": config.max_trades_per_day,
             "trade_cooldown_bars": config.trade_cooldown_bars,
@@ -461,7 +481,16 @@ async def configure_session(
     ticker: str,
     date: str,
     regime_detection_minutes: int = 15,
+    regime_refresh_bars: int = 12,
     account_size_usd: float = 10_000.0,
+    l2_confirm_enabled: bool = False,
+    l2_min_delta: float = 0.0,
+    l2_min_imbalance: float = 0.0,
+    l2_min_iceberg_bias: float = 0.0,
+    l2_lookback_bars: int = 3,
+    l2_min_participation_ratio: float = 0.0,
+    l2_min_directional_consistency: float = 0.0,
+    l2_min_signed_aggression: float = 0.0,
 ):
     """Configure session parameters before processing."""
     session = day_trading_manager.get_or_create_session(
@@ -471,17 +500,109 @@ async def configure_session(
         regime_detection_minutes=regime_detection_minutes
     )
     session.regime_detection_minutes = regime_detection_minutes
+    session.regime_refresh_bars = max(3, int(regime_refresh_bars))
+    day_trading_manager.regime_refresh_bars = max(3, int(regime_refresh_bars))
     session.account_size_usd = account_size_usd
     day_trading_manager.set_run_defaults(
         run_id=run_id,
         ticker=ticker,
         regime_detection_minutes=regime_detection_minutes,
+        regime_refresh_bars=regime_refresh_bars,
         account_size_usd=account_size_usd,
+        l2_confirm_enabled=l2_confirm_enabled,
+        l2_min_delta=l2_min_delta,
+        l2_min_imbalance=l2_min_imbalance,
+        l2_min_iceberg_bias=l2_min_iceberg_bias,
+        l2_lookback_bars=l2_lookback_bars,
+        l2_min_participation_ratio=l2_min_participation_ratio,
+        l2_min_directional_consistency=l2_min_directional_consistency,
+        l2_min_signed_aggression=l2_min_signed_aggression,
     )
     
     return {
         "message": "Session configured",
         "session": session.to_dict()
+    }
+
+
+# ============ Multi-Layer Decision Engine Config ============
+
+
+class MultiLayerConfig(BaseModel):
+    """Configuration for the multi-layer decision engine."""
+    pattern_weight: Optional[float] = None
+    strategy_weight: Optional[float] = None
+    threshold: Optional[float] = None
+    require_pattern: Optional[bool] = None
+    # Candlestick pattern detector settings
+    body_doji_pct: Optional[float] = None
+    wick_ratio_hammer: Optional[float] = None
+    engulfing_min_body_pct: Optional[float] = None
+    volume_confirm_ratio: Optional[float] = None
+    vwap_proximity_pct: Optional[float] = None
+
+
+@app.get("/api/multilayer/config")
+async def get_multilayer_config():
+    """Get current multi-layer decision engine configuration."""
+    ml = day_trading_manager.multi_layer
+    pd = ml.pattern_detector
+    return {
+        "pattern_weight": ml.pattern_weight,
+        "strategy_weight": ml.strategy_weight,
+        "threshold": ml.threshold,
+        "require_pattern": ml.require_pattern,
+        "detector": {
+            "body_doji_pct": pd.body_doji_pct,
+            "wick_ratio_hammer": pd.wick_ratio_hammer,
+            "engulfing_min_body_pct": pd.engulfing_min_body_pct,
+            "volume_confirm_ratio": pd.volume_confirm_ratio,
+            "vwap_proximity_pct": pd.vwap_proximity_pct,
+        },
+    }
+
+
+@app.post("/api/multilayer/config")
+async def update_multilayer_config(config: MultiLayerConfig):
+    """Update multi-layer decision engine configuration."""
+    ml = day_trading_manager.multi_layer
+    pd = ml.pattern_detector
+    updated = {}
+
+    if config.pattern_weight is not None:
+        ml.pattern_weight = config.pattern_weight
+        updated["pattern_weight"] = config.pattern_weight
+    if config.strategy_weight is not None:
+        ml.strategy_weight = config.strategy_weight
+        updated["strategy_weight"] = config.strategy_weight
+    if config.threshold is not None:
+        ml.threshold = config.threshold
+        updated["threshold"] = config.threshold
+    if config.require_pattern is not None:
+        ml.require_pattern = config.require_pattern
+        updated["require_pattern"] = config.require_pattern
+
+    # Detector settings
+    if config.body_doji_pct is not None:
+        pd.body_doji_pct = config.body_doji_pct
+        updated["body_doji_pct"] = config.body_doji_pct
+    if config.wick_ratio_hammer is not None:
+        pd.wick_ratio_hammer = config.wick_ratio_hammer
+        updated["wick_ratio_hammer"] = config.wick_ratio_hammer
+    if config.engulfing_min_body_pct is not None:
+        pd.engulfing_min_body_pct = config.engulfing_min_body_pct
+        updated["engulfing_min_body_pct"] = config.engulfing_min_body_pct
+    if config.volume_confirm_ratio is not None:
+        pd.volume_confirm_ratio = config.volume_confirm_ratio
+        updated["volume_confirm_ratio"] = config.volume_confirm_ratio
+    if config.vwap_proximity_pct is not None:
+        pd.vwap_proximity_pct = config.vwap_proximity_pct
+        updated["vwap_proximity_pct"] = config.vwap_proximity_pct
+
+    return {
+        "message": "Multi-layer config updated",
+        "updated": updated,
+        "current": (await get_multilayer_config()),
     }
 
 

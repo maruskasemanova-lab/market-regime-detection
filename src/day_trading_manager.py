@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional
 from enum import Enum
 import json
 import logging
+import math
 import re
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,10 @@ from .strategies.rotation import RotationStrategy
 from .strategies.vwap_magnet import VWAPMagnetStrategy
 from .strategies.volume_profile import VolumeProfileStrategy
 from .strategies.gap_liquidity import GapLiquidityStrategy
+from .strategies.absorption_reversal import AbsorptionReversalStrategy
+from .strategies.momentum_flow import MomentumFlowStrategy
+from .strategies.exhaustion_fade import ExhaustionFadeStrategy
+from .multi_layer_decision import MultiLayerDecision
 
 
 class SessionPhase(Enum):
@@ -43,6 +48,14 @@ class BarData:
     close: float
     volume: float
     vwap: Optional[float] = None
+    l2_delta: Optional[float] = None
+    l2_buy_volume: Optional[float] = None
+    l2_sell_volume: Optional[float] = None
+    l2_volume: Optional[float] = None
+    l2_imbalance: Optional[float] = None
+    l2_iceberg_buy_count: Optional[float] = None
+    l2_iceberg_sell_count: Optional[float] = None
+    l2_iceberg_bias: Optional[float] = None
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -52,7 +65,15 @@ class BarData:
             'low': self.low,
             'close': self.close,
             'volume': self.volume,
-            'vwap': self.vwap
+            'vwap': self.vwap,
+            'l2_delta': self.l2_delta,
+            'l2_buy_volume': self.l2_buy_volume,
+            'l2_sell_volume': self.l2_sell_volume,
+            'l2_volume': self.l2_volume,
+            'l2_imbalance': self.l2_imbalance,
+            'l2_iceberg_buy_count': self.l2_iceberg_buy_count,
+            'l2_iceberg_sell_count': self.l2_iceberg_sell_count,
+            'l2_iceberg_bias': self.l2_iceberg_bias,
         }
 
 
@@ -78,6 +99,10 @@ class DayTrade:
     finra_fee: float = 0.0
     total_costs: float = 0.0
     gross_pnl_pct: float = 0.0  # PnL before costs
+    signal_bar_index: Optional[int] = None
+    entry_bar_index: Optional[int] = None
+    signal_timestamp: Optional[str] = None
+    signal_price: Optional[float] = None
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -100,7 +125,11 @@ class DayTrade:
                 'finra_fee': round(self.finra_fee, 6),
                 'total': round(self.total_costs, 4)
             },
-            'gross_pnl_pct': round(self.gross_pnl_pct, 2)
+            'gross_pnl_pct': round(self.gross_pnl_pct, 2),
+            'signal_bar_index': self.signal_bar_index,
+            'entry_bar_index': self.entry_bar_index,
+            'signal_timestamp': self.signal_timestamp,
+            'signal_price': round(self.signal_price, 4) if self.signal_price is not None else None,
         }
 
 
@@ -176,10 +205,12 @@ class TradingSession:
     ticker: str
     date: str
     regime_detection_minutes: int = 15
+    regime_refresh_bars: int = 12
     
     # Session state
     phase: SessionPhase = SessionPhase.PRE_MARKET
     detected_regime: Optional[Regime] = None
+    micro_regime: str = "MIXED"
     active_strategies: List[str] = field(default_factory=list)
     selected_strategy: Optional[str] = None  # Helper for backwards compat logic
     
@@ -192,6 +223,12 @@ class TradingSession:
     trades: List[DayTrade] = field(default_factory=list)
     signals: List[Signal] = field(default_factory=list)
     trade_counter: int = 0
+    pending_signal: Optional[Signal] = None
+    pending_signal_bar_index: int = -1
+    last_exit_bar_index: int = -1
+    last_regime_refresh_bar_index: int = -1
+    regime_history: List[Dict[str, Any]] = field(default_factory=list)
+    multi_layer: Optional[MultiLayerDecision] = None
     
     # Market hours (ET)
     market_open: time = field(default_factory=lambda: time(9, 30))
@@ -207,6 +244,14 @@ class TradingSession:
     total_pnl: float = 0.0
     regime_start_ts: Optional[datetime] = None
     account_size_usd: float = 10_000.0
+    l2_confirm_enabled: bool = False
+    l2_min_delta: float = 0.0
+    l2_min_imbalance: float = 0.0
+    l2_min_iceberg_bias: float = 0.0
+    l2_lookback_bars: int = 3
+    l2_min_participation_ratio: float = 0.0
+    l2_min_directional_consistency: float = 0.0
+    l2_min_signed_aggression: float = 0.0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -215,15 +260,28 @@ class TradingSession:
             'date': self.date,
             'phase': self.phase.value,
             'regime': self.detected_regime.value if self.detected_regime else None,
+            'micro_regime': self.micro_regime,
             'selected_strategy': self.selected_strategy,
+            'active_strategies': list(self.active_strategies),
             'bars_count': len(self.bars),
             'pre_market_bars_count': len(self.pre_market_bars),
             'active_position': self.active_position.to_dict() if self.active_position else None,
+            'has_pending_signal': self.pending_signal is not None,
             'trades_count': len(self.trades),
             'signals_count': len(self.signals),
             'total_pnl': round(self.total_pnl, 2),
             'start_price': self.start_price,
-            'end_price': self.end_price
+            'end_price': self.end_price,
+            'l2_confirm_enabled': self.l2_confirm_enabled,
+            'l2_min_delta': self.l2_min_delta,
+            'l2_min_imbalance': self.l2_min_imbalance,
+            'l2_min_iceberg_bias': self.l2_min_iceberg_bias,
+            'l2_lookback_bars': self.l2_lookback_bars,
+            'l2_min_participation_ratio': self.l2_min_participation_ratio,
+            'l2_min_directional_consistency': self.l2_min_directional_consistency,
+            'l2_min_signed_aggression': self.l2_min_signed_aggression,
+            'regime_refresh_bars': self.regime_refresh_bars,
+            'regime_history': list(self.regime_history),
         }
 
 
@@ -240,6 +298,7 @@ class DayTradingManager:
         max_daily_loss: float = 300.0,
         max_trades_per_day: int = 3,
         trade_cooldown_bars: int = 15,  # Cooldown between trades in bars
+        regime_refresh_bars: int = 12,
     ):
         self.sessions: Dict[str, TradingSession] = {}  # session_key -> TradingSession
         self.regime_detection_minutes = regime_detection_minutes
@@ -247,11 +306,20 @@ class DayTradingManager:
         self.max_daily_loss = max_daily_loss  # Stop trading if loss exceeds this amount
         self.max_trades_per_day = max_trades_per_day  # Limit trades to reduce fees
         self.trade_cooldown_bars = trade_cooldown_bars  # Cooldown between trades
+        self.regime_refresh_bars = max(3, int(regime_refresh_bars))
         self.market_tz = ZoneInfo("America/New_York")
         self.run_defaults: Dict[tuple, Dict[str, Any]] = {}
         
         self.last_trade_bar_index = {}  # Track last trade bar per session
-        
+
+        # Multi-layer decision engine
+        self.multi_layer = MultiLayerDecision(
+            pattern_weight=0.2,
+            strategy_weight=0.8,
+            threshold=65.0,
+            require_pattern=False,
+        )
+
         # Pre-configured strategies
         self.strategies = {
             'mean_reversion': MeanReversionStrategy(),
@@ -260,15 +328,27 @@ class DayTradingManager:
             'rotation': RotationStrategy(),
             'vwap_magnet': VWAPMagnetStrategy(),
             'volume_profile': VolumeProfileStrategy(),
-            'gap_liquidity': GapLiquidityStrategy()
+            'gap_liquidity': GapLiquidityStrategy(),
+            'absorption_reversal': AbsorptionReversalStrategy(),
+            'momentum_flow': MomentumFlowStrategy(),
+            'exhaustion_fade': ExhaustionFadeStrategy(),
         }
         
         # Strategy selection by regime
         # Default Preferences - including new volume-focused strategies
         self.default_preference = {
-            Regime.TRENDING: ['momentum', 'pullback', 'gap_liquidity', 'volume_profile', 'vwap_magnet'],
-            Regime.CHOPPY: ['mean_reversion', 'vwap_magnet', 'volume_profile'],
-            Regime.MIXED: ['volume_profile', 'gap_liquidity', 'mean_reversion', 'vwap_magnet', 'rotation']
+            Regime.TRENDING: ['momentum_flow', 'momentum', 'pullback', 'gap_liquidity', 'volume_profile', 'vwap_magnet'],
+            Regime.CHOPPY: ['absorption_reversal', 'exhaustion_fade', 'mean_reversion', 'vwap_magnet', 'volume_profile'],
+            Regime.MIXED: ['exhaustion_fade', 'absorption_reversal', 'volume_profile', 'gap_liquidity', 'mean_reversion', 'vwap_magnet', 'rotation']
+        }
+
+        self.micro_regime_preference = {
+            "TRENDING_UP": ['momentum_flow', 'momentum', 'pullback', 'gap_liquidity'],
+            "TRENDING_DOWN": ['momentum_flow', 'momentum', 'gap_liquidity', 'pullback'],
+            "CHOPPY": ['absorption_reversal', 'exhaustion_fade', 'mean_reversion', 'vwap_magnet'],
+            "ABSORPTION": ['absorption_reversal', 'exhaustion_fade', 'vwap_magnet'],
+            "BREAKOUT": ['momentum_flow', 'momentum', 'gap_liquidity'],
+            "MIXED": ['exhaustion_fade', 'volume_profile', 'rotation'],
         }
         
         # Ticker-Specific Preferences (AOS Optimized)
@@ -346,14 +426,16 @@ class DayTradingManager:
             try:
                 with open(config_path, 'r') as f:
                     config = json.load(f)
-                
+
+                loaded_ticker_params: Dict[str, Dict[str, Any]] = {}
+
                 # Load ticker-specific parameters (do not mutate global strategy
                 # instances per ticker; apply overrides at signal generation time).
                 for ticker, ticker_config in config.get('tickers', {}).items():
                     ticker_key = str(ticker).upper()
                     primary_strategy = self._canonical_strategy_key(ticker_config.get('strategy', ''))
                     backup_strategy = self._canonical_strategy_key(ticker_config.get('backup_strategy', ''))
-                    self.ticker_params[ticker_key] = {
+                    loaded_ticker_params[ticker_key] = {
                         'strategy': primary_strategy,
                         'backup_strategy': backup_strategy,
                         'params': ticker_config.get('params', {}),
@@ -363,10 +445,13 @@ class DayTradingManager:
                         'long_only': ticker_config.get('long_only', False),
                         'time_filter_enabled': ticker_config.get('time_filter_enabled', True),
                         'min_confidence': ticker_config.get('min_confidence', 65.0),
-                        'max_daily_trades': ticker_config.get('max_daily_trades', 2)
+                        'max_daily_trades': ticker_config.get('max_daily_trades', 2),
+                        'multilayer': self._extract_ticker_multilayer_config(ticker_config),
+                        'l2': ticker_config.get('l2', {}) if isinstance(ticker_config.get('l2'), dict) else {},
                     }
-                
-                logger.info(f"Loaded AOS config from {config_path}")
+
+                self.ticker_params = loaded_ticker_params
+                logger.info(f"Loaded AOS config from {config_path} ({len(self.ticker_params)} tickers)")
             except Exception as e:
                 logger.warning(f"Could not load AOS config: {e}")
         
@@ -397,6 +482,117 @@ class DayTradingManager:
                 return key
 
         return snake
+
+    @staticmethod
+    def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "y", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "n", "off"}:
+                return False
+        return default
+
+    def _extract_ticker_multilayer_config(self, ticker_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract ticker-specific multi-layer/candlestick settings."""
+        allowed_core = {"pattern_weight", "strategy_weight", "threshold", "require_pattern"}
+        allowed_detector = {
+            "body_doji_pct",
+            "wick_ratio_hammer",
+            "engulfing_min_body_pct",
+            "volume_confirm_ratio",
+            "vwap_proximity_pct",
+        }
+
+        raw: Dict[str, Any] = {}
+        for key in ("multilayer", "multi_layer"):
+            block = ticker_config.get(key)
+            if isinstance(block, dict):
+                raw.update(block)
+
+        candlestick = ticker_config.get("candlestick")
+        if isinstance(candlestick, dict):
+            nested_ml = candlestick.get("multilayer")
+            if isinstance(nested_ml, dict):
+                raw.update(nested_ml)
+            detector = candlestick.get("detector")
+            if isinstance(detector, dict):
+                raw.update(detector)
+            for key in allowed_core.union(allowed_detector):
+                if key in candlestick:
+                    raw[key] = candlestick[key]
+
+        for key in allowed_core.union(allowed_detector):
+            if key in ticker_config and key not in raw:
+                raw[key] = ticker_config[key]
+
+        nested_detector = raw.get("detector")
+        if isinstance(nested_detector, dict):
+            for key in allowed_detector:
+                if key in nested_detector and key not in raw:
+                    raw[key] = nested_detector[key]
+
+        out: Dict[str, Any] = {}
+        for key in ("pattern_weight", "strategy_weight", "threshold"):
+            if key not in raw:
+                continue
+            value = self._safe_float(raw.get(key))
+            if value is not None:
+                out[key] = value
+
+        if "require_pattern" in raw:
+            out["require_pattern"] = self._safe_bool(raw.get("require_pattern"), default=False)
+
+        for key in allowed_detector:
+            if key not in raw:
+                continue
+            value = self._safe_float(raw.get(key))
+            if value is not None:
+                out[key] = value
+
+        return out
+
+    def _build_multilayer_for_ticker(self, ticker: str) -> MultiLayerDecision:
+        """Build a per-session multi-layer engine using ticker overrides."""
+        ticker_cfg = self.ticker_params.get(str(ticker).upper(), {})
+        ml_overrides = ticker_cfg.get("multilayer", {}) if isinstance(ticker_cfg, dict) else {}
+
+        base_ml = self.multi_layer
+        ml = MultiLayerDecision(
+            pattern_weight=float(ml_overrides.get("pattern_weight", base_ml.pattern_weight)),
+            strategy_weight=float(ml_overrides.get("strategy_weight", base_ml.strategy_weight)),
+            threshold=float(ml_overrides.get("threshold", base_ml.threshold)),
+            require_pattern=self._safe_bool(
+                ml_overrides.get("require_pattern", base_ml.require_pattern),
+                default=base_ml.require_pattern,
+            ),
+        )
+
+        detector = ml.pattern_detector
+        base_detector = base_ml.pattern_detector
+        detector.body_doji_pct = float(ml_overrides.get("body_doji_pct", base_detector.body_doji_pct))
+        detector.wick_ratio_hammer = float(ml_overrides.get("wick_ratio_hammer", base_detector.wick_ratio_hammer))
+        detector.engulfing_min_body_pct = float(
+            ml_overrides.get("engulfing_min_body_pct", base_detector.engulfing_min_body_pct)
+        )
+        detector.volume_confirm_ratio = float(
+            ml_overrides.get("volume_confirm_ratio", base_detector.volume_confirm_ratio)
+        )
+        detector.vwap_proximity_pct = float(
+            ml_overrides.get("vwap_proximity_pct", base_detector.vwap_proximity_pct)
+        )
+        return ml
 
     def _is_day_allowed(self, date_str: str, ticker: str) -> bool:
         """Check if trading day is allowed by ticker-specific avoid_days."""
@@ -471,18 +667,46 @@ class DayTradingManager:
         key = self._get_session_key(run_id, ticker, date)
         
         if key not in self.sessions:
+            # Refresh AOS config for newly created sessions so dashboard updates
+            # (including candlestick/multi-layer thresholds) are picked up.
+            self._load_aos_config()
+
             self.sessions[key] = TradingSession(
                 run_id=run_id,
                 ticker=ticker,
                 date=date,
                 regime_detection_minutes=regime_detection_minutes or self.regime_detection_minutes
             )
-            
-            # Rule: No Fridays (Day 4)
-            # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
-            if datetime.strptime(date, "%Y-%m-%d").weekday() == 4:
-                self.sessions[key].phase = SessionPhase.CLOSED
-            elif not self._is_day_allowed(date, ticker):
+            self.sessions[key].regime_refresh_bars = self.regime_refresh_bars
+            self.sessions[key].multi_layer = self._build_multilayer_for_ticker(ticker)
+            ticker_cfg = self.ticker_params.get(str(ticker).upper(), {})
+            l2_cfg = ticker_cfg.get("l2", {}) if isinstance(ticker_cfg, dict) else {}
+            if isinstance(l2_cfg, dict):
+                self.sessions[key].l2_confirm_enabled = bool(l2_cfg.get("confirm_enabled", False))
+                self.sessions[key].l2_min_delta = self._safe_float(
+                    l2_cfg.get("min_delta"), 0.0
+                ) or 0.0
+                self.sessions[key].l2_min_imbalance = self._safe_float(
+                    l2_cfg.get("min_imbalance"), 0.0
+                ) or 0.0
+                self.sessions[key].l2_min_iceberg_bias = self._safe_float(
+                    l2_cfg.get("min_iceberg_bias"), 0.0
+                ) or 0.0
+                self.sessions[key].l2_lookback_bars = max(
+                    1, int(self._safe_float(l2_cfg.get("lookback_bars"), 3) or 3)
+                )
+                self.sessions[key].l2_min_participation_ratio = self._safe_float(
+                    l2_cfg.get("min_participation_ratio"), 0.0
+                ) or 0.0
+                self.sessions[key].l2_min_directional_consistency = self._safe_float(
+                    l2_cfg.get("min_directional_consistency"), 0.0
+                ) or 0.0
+                self.sessions[key].l2_min_signed_aggression = self._safe_float(
+                    l2_cfg.get("min_signed_aggression"), 0.0
+                ) or 0.0
+
+            # Optional config-driven day filter.
+            if not self._is_day_allowed(date, ticker):
                 self.sessions[key].phase = SessionPhase.CLOSED
         
         return self.sessions[key]
@@ -492,15 +716,42 @@ class DayTradingManager:
         run_id: str,
         ticker: str,
         regime_detection_minutes: Optional[int] = None,
-        account_size_usd: Optional[float] = None
+        regime_refresh_bars: Optional[int] = None,
+        account_size_usd: Optional[float] = None,
+        l2_confirm_enabled: Optional[bool] = None,
+        l2_min_delta: Optional[float] = None,
+        l2_min_imbalance: Optional[float] = None,
+        l2_min_iceberg_bias: Optional[float] = None,
+        l2_lookback_bars: Optional[int] = None,
+        l2_min_participation_ratio: Optional[float] = None,
+        l2_min_directional_consistency: Optional[float] = None,
+        l2_min_signed_aggression: Optional[float] = None,
     ) -> None:
         """Set default parameters for all sessions in a run."""
         key = (run_id, ticker)
         defaults = self.run_defaults.get(key, {})
         if regime_detection_minutes is not None:
             defaults["regime_detection_minutes"] = regime_detection_minutes
+        if regime_refresh_bars is not None:
+            defaults["regime_refresh_bars"] = max(3, int(regime_refresh_bars))
         if account_size_usd is not None:
             defaults["account_size_usd"] = account_size_usd
+        if l2_confirm_enabled is not None:
+            defaults["l2_confirm_enabled"] = bool(l2_confirm_enabled)
+        if l2_min_delta is not None:
+            defaults["l2_min_delta"] = float(l2_min_delta)
+        if l2_min_imbalance is not None:
+            defaults["l2_min_imbalance"] = float(l2_min_imbalance)
+        if l2_min_iceberg_bias is not None:
+            defaults["l2_min_iceberg_bias"] = float(l2_min_iceberg_bias)
+        if l2_lookback_bars is not None:
+            defaults["l2_lookback_bars"] = max(1, int(l2_lookback_bars))
+        if l2_min_participation_ratio is not None:
+            defaults["l2_min_participation_ratio"] = float(l2_min_participation_ratio)
+        if l2_min_directional_consistency is not None:
+            defaults["l2_min_directional_consistency"] = float(l2_min_directional_consistency)
+        if l2_min_signed_aggression is not None:
+            defaults["l2_min_signed_aggression"] = float(l2_min_signed_aggression)
         self.run_defaults[key] = defaults
     
     def get_session(self, run_id: str, ticker: str, date: str) -> Optional[TradingSession]:
@@ -538,6 +789,24 @@ class DayTradingManager:
         )
         if "account_size_usd" in defaults:
             session.account_size_usd = defaults["account_size_usd"]
+        if "regime_refresh_bars" in defaults:
+            session.regime_refresh_bars = max(3, int(defaults["regime_refresh_bars"]))
+        if "l2_confirm_enabled" in defaults:
+            session.l2_confirm_enabled = bool(defaults["l2_confirm_enabled"])
+        if "l2_min_delta" in defaults:
+            session.l2_min_delta = float(defaults["l2_min_delta"])
+        if "l2_min_imbalance" in defaults:
+            session.l2_min_imbalance = float(defaults["l2_min_imbalance"])
+        if "l2_min_iceberg_bias" in defaults:
+            session.l2_min_iceberg_bias = float(defaults["l2_min_iceberg_bias"])
+        if "l2_lookback_bars" in defaults:
+            session.l2_lookback_bars = max(1, int(defaults["l2_lookback_bars"]))
+        if "l2_min_participation_ratio" in defaults:
+            session.l2_min_participation_ratio = float(defaults["l2_min_participation_ratio"])
+        if "l2_min_directional_consistency" in defaults:
+            session.l2_min_directional_consistency = float(defaults["l2_min_directional_consistency"])
+        if "l2_min_signed_aggression" in defaults:
+            session.l2_min_signed_aggression = float(defaults["l2_min_signed_aggression"])
         if session.phase == SessionPhase.CLOSED:
              return {'action': 'skipped_finished_session'}
         
@@ -555,7 +824,15 @@ class DayTradingManager:
             low=bar_data.get('low', 0),
             close=bar_data.get('close', 0),
             volume=bar_data.get('volume', 0),
-            vwap=bar_data.get('vwap')
+            vwap=bar_data.get('vwap'),
+            l2_delta=bar_data.get('l2_delta'),
+            l2_buy_volume=bar_data.get('l2_buy_volume'),
+            l2_sell_volume=bar_data.get('l2_sell_volume'),
+            l2_volume=bar_data.get('l2_volume'),
+            l2_imbalance=bar_data.get('l2_imbalance'),
+            l2_iceberg_buy_count=bar_data.get('l2_iceberg_buy_count'),
+            l2_iceberg_sell_count=bar_data.get('l2_iceberg_sell_count'),
+            l2_iceberg_bias=bar_data.get('l2_iceberg_bias'),
         )
         
         bar_time = market_ts.time()
@@ -568,6 +845,7 @@ class DayTradingManager:
             'signal': None,
             'trade_closed': None,
             'regime': session.detected_regime.value if session.detected_regime else None,
+            'micro_regime': session.micro_regime,
             'strategy': session.selected_strategy
         }
         
@@ -613,22 +891,37 @@ class DayTradingManager:
                 session.selected_strategy = (
                     "adaptive" if len(active_strategies) > 1 else (active_strategies[0] if active_strategies else None)
                 )
+                session.last_regime_refresh_bar_index = max(0, len(session.bars) - 1)
+                session.regime_history.append(
+                    {
+                        "timestamp": timestamp.isoformat(),
+                        "bar_index": session.last_regime_refresh_bar_index,
+                        "regime": regime.value,
+                        "micro_regime": session.micro_regime,
+                        "strategies": list(active_strategies),
+                    }
+                )
                 
                 # Transition to trading
                 session.phase = SessionPhase.TRADING
                 result['action'] = 'regime_detected'
                 result['regime'] = regime.value
+                result['micro_regime'] = session.micro_regime
                 result['strategies'] = active_strategies
                 result['strategy'] = session.selected_strategy
                 # print(f"DEBUG: Regime DETECTED {regime} at {timestamp}. Strategy: {active_strategies[0]}", flush=True)
                 
                 # Include indicator values for frontend decision markers
                 indicators = self._calculate_indicators(session.bars)
+                flow = indicators.get('order_flow') or {}
                 result['indicators'] = {
                     'trend_efficiency': self._calc_trend_efficiency(session.bars),
                     'volatility': self._calc_volatility(session.bars),
                     'atr': indicators.get('atr', [0])[-1] if indicators.get('atr') else 0,
-                    'adx': indicators.get('adx', [0])[-1] if indicators.get('adx') else 0
+                    'adx': indicators.get('adx', [0])[-1] if indicators.get('adx') else 0,
+                    'flow_score': float(flow.get('flow_score', 0.0) or 0.0),
+                    'signed_aggression': float(flow.get('signed_aggression', 0.0) or 0.0),
+                    'absorption_rate': float(flow.get('absorption_rate', 0.0) or 0.0),
                 }
             else:
                 result['action'] = 'collecting_regime_data'
@@ -663,67 +956,259 @@ class DayTradingManager:
             result['action'] = 'session_already_closed'
             
         result['phase'] = session.phase.value
+        result['micro_regime'] = session.micro_regime
         return result
     
     def _detect_regime(self, session: TradingSession) -> Regime:
-        """Detect market regime from collected bars."""
-        # Combine pre-market and regular bars for analysis
+        """Detect macro regime and update session micro-regime."""
         all_bars = session.bars
-        
         if len(all_bars) < 20:
+            session.micro_regime = "MIXED"
             return Regime.MIXED
-        
-        # Calculate trend efficiency
+
         closes = [b.close for b in all_bars[-min(len(all_bars), 60):]]
-        
         if len(closes) < 10:
+            session.micro_regime = "MIXED"
             return Regime.MIXED
-        
-        # Net move vs total move
+
         net_move = abs(closes[-1] - closes[0])
-        total_move = sum(abs(closes[i] - closes[i-1]) for i in range(1, len(closes)))
-        
+        total_move = sum(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
         if total_move == 0:
+            session.micro_regime = "MIXED"
             return Regime.MIXED
-        
         trend_efficiency = net_move / total_move
-        
-        # Calculate ADX (using all available bars)
+
         adx = self._calc_adx(all_bars)
-        
-        # Calculate volatility
-        returns = [(closes[i] - closes[i-1]) / closes[i-1] for i in range(1, len(closes))]
-        avg_return = sum(returns) / len(returns)
-        variance = sum((r - avg_return) ** 2 for r in returns) / len(returns)
+        returns = [
+            (closes[i] - closes[i - 1]) / closes[i - 1]
+            for i in range(1, len(closes))
+            if closes[i - 1] != 0
+        ]
+        avg_return = (sum(returns) / len(returns)) if returns else 0.0
+        variance = (sum((r - avg_return) ** 2 for r in returns) / len(returns)) if returns else 0.0
         volatility = variance ** 0.5
-        
-        # Check for pre-market gap
-        gap_factor = 0
+        price_bias = closes[-1] - closes[0]
+
+        # Preserve prior gap context from pre-market.
+        gap_factor = 0.0
         if session.pre_market_bars and session.bars:
             pre_close = session.pre_market_bars[-1].close
             open_price = session.bars[0].open
-            gap_pct = abs(open_price - pre_close) / pre_close * 100
-            if gap_pct > 1.0:
-                gap_factor = 0.1  # Slight trending bias for gap days
-        
-        # Classification Logic with ADX
-        adjusted_efficiency = trend_efficiency + gap_factor
-        
-        # 1. Strong Trend: High Efficiency OR High ADX
-        if adjusted_efficiency >= 0.6 or adx > 30:
+            if pre_close > 0:
+                gap_pct = abs(open_price - pre_close) / pre_close * 100.0
+                if gap_pct > 1.0:
+                    gap_factor = 0.1
+
+        flow = self._calculate_order_flow_metrics(all_bars, lookback=min(24, len(all_bars)))
+        micro_regime = self._classify_micro_regime(
+            trend_efficiency=trend_efficiency + gap_factor,
+            adx=adx,
+            volatility=volatility,
+            price_bias=price_bias,
+            flow=flow,
+        )
+        session.micro_regime = micro_regime
+        return self._map_micro_to_regime(micro_regime)
+
+    @staticmethod
+    def _safe_div(numerator: float, denominator: float, default: float = 0.0) -> float:
+        if denominator == 0:
+            return default
+        return numerator / denominator
+
+    def _map_micro_to_regime(self, micro_regime: str) -> Regime:
+        if micro_regime in {"TRENDING_UP", "TRENDING_DOWN", "BREAKOUT"}:
             return Regime.TRENDING
-            
-        # 2. Choppy: Low ADX
-        elif adx < 20:
+        if micro_regime in {"CHOPPY", "ABSORPTION"}:
             return Regime.CHOPPY
-            
-        # 3. Mixed: Anything else
-        else:
-            return Regime.MIXED
+        return Regime.MIXED
+
+    def _classify_micro_regime(
+        self,
+        trend_efficiency: float,
+        adx: float,
+        volatility: float,
+        price_bias: float,
+        flow: Dict[str, float],
+    ) -> str:
+        """Map price + order-flow behavior to a richer intraday micro-regime."""
+        signed_aggr = float(flow.get("signed_aggression", 0.0))
+        consistency = float(flow.get("directional_consistency", 0.0))
+        sweep_intensity = float(flow.get("sweep_intensity", 0.0))
+        absorption_rate = float(flow.get("absorption_rate", 0.0))
+        price_change_pct = float(flow.get("price_change_pct", 0.0))
+        flow_has_coverage = bool(flow.get("has_l2_coverage", False))
+
+        if flow_has_coverage:
+            if sweep_intensity >= 0.35 and consistency >= 0.55 and abs(signed_aggr) >= 0.10:
+                return "BREAKOUT"
+            if absorption_rate >= 0.58 and abs(price_change_pct) <= max(0.12, volatility * 100.0 * 0.8):
+                return "ABSORPTION"
+
+            if trend_efficiency >= 0.58 and adx >= 25.0 and signed_aggr >= 0.08 and price_bias > 0:
+                return "TRENDING_UP"
+            if trend_efficiency >= 0.58 and adx >= 25.0 and signed_aggr <= -0.08 and price_bias < 0:
+                return "TRENDING_DOWN"
+
+            if adx < 20.0 and trend_efficiency < 0.40:
+                return "CHOPPY"
+            return "MIXED"
+
+        # Fallback without L2 flow coverage.
+        if trend_efficiency >= 0.62 or adx > 30.0:
+            return "TRENDING_UP" if price_bias >= 0 else "TRENDING_DOWN"
+        if adx < 20.0:
+            return "CHOPPY"
+        return "MIXED"
+
+    def _calculate_order_flow_metrics(
+        self,
+        bars: List[BarData],
+        lookback: int = 20,
+    ) -> Dict[str, float]:
+        """Calculate no-lookahead microstructure metrics from existing L2-enriched bars."""
+        window_size = max(5, int(lookback))
+        window = bars[-window_size:] if bars else []
+
+        if not window:
+            return {
+                "has_l2_coverage": False,
+                "bars_with_l2": 0.0,
+                "lookback_bars": float(window_size),
+            }
+
+        bars_with_l2 = 0
+        deltas: List[float] = []
+        imbalances: List[float] = []
+        iceberg_biases: List[float] = []
+        l2_volumes: List[float] = []
+        bar_volumes: List[float] = []
+        close_to_close_pct: List[float] = []
+        for i, b in enumerate(window):
+            has_l2 = (
+                b.l2_delta is not None
+                or b.l2_imbalance is not None
+                or b.l2_volume is not None
+                or b.l2_iceberg_bias is not None
+            )
+            if has_l2:
+                bars_with_l2 += 1
+
+            deltas.append(self._to_float(b.l2_delta, 0.0))
+            imbalances.append(self._to_float(b.l2_imbalance, 0.0))
+            iceberg_biases.append(self._to_float(b.l2_iceberg_bias, 0.0))
+            l2_volumes.append(max(0.0, self._to_float(b.l2_volume, 0.0)))
+            bar_volumes.append(max(0.0, self._to_float(b.volume, 0.0)))
+
+            if i > 0 and window[i - 1].close > 0:
+                close_to_close_pct.append((b.close - window[i - 1].close) / window[i - 1].close * 100.0)
+
+        has_l2_coverage = bars_with_l2 >= max(3, len(window) // 2)
+        cumulative_delta = float(sum(deltas))
+        avg_imbalance = float(sum(imbalances) / len(imbalances)) if imbalances else 0.0
+        iceberg_bias_sum = float(sum(iceberg_biases))
+        total_l2_volume = float(sum(l2_volumes))
+        total_bar_volume = float(sum(bar_volumes))
+        participation_ratio = self._safe_div(total_l2_volume, total_bar_volume, 0.0)
+        signed_aggression = self._safe_div(cumulative_delta, total_l2_volume, 0.0)
+
+        # Delta acceleration compares current window against immediate previous window.
+        prev_window = bars[-(window_size * 2): -window_size] if len(bars) > window_size else []
+        prev_delta = float(sum(self._to_float(b.l2_delta, 0.0) for b in prev_window)) if prev_window else 0.0
+        delta_acceleration = cumulative_delta - prev_delta
+
+        first_close = window[0].close
+        last_close = window[-1].close
+        price_change_pct = self._safe_div((last_close - first_close) * 100.0, first_close, 0.0)
+
+        # Directional consistency: delta sign agrees with bar-to-bar close change sign.
+        directional_base = 0
+        directional_hits = 0
+        low_progress_l2_volume = 0.0
+        for i in range(1, len(window)):
+            delta_val = deltas[i]
+            prev_close = window[i - 1].close
+            if prev_close <= 0:
+                continue
+            price_change = (window[i].close - prev_close) / prev_close * 100.0
+            if abs(delta_val) > 1e-9 and abs(price_change) > 1e-6:
+                directional_base += 1
+                if (delta_val * price_change) > 0:
+                    directional_hits += 1
+
+            # Absorption proxy: large flow while price barely moves.
+            if abs(price_change) <= 0.02:
+                low_progress_l2_volume += l2_volumes[i]
+
+        directional_consistency = self._safe_div(float(directional_hits), float(directional_base), 0.0)
+        absorption_rate = self._safe_div(low_progress_l2_volume, total_l2_volume, 0.0)
+
+        # Sweep proxy: bursty delta and elevated L2 volume.
+        abs_deltas = [abs(v) for v in deltas]
+        mean_abs_delta = sum(abs_deltas) / len(abs_deltas) if abs_deltas else 0.0
+        delta_variance = (
+            sum((ad - mean_abs_delta) ** 2 for ad in abs_deltas) / len(abs_deltas)
+            if abs_deltas else 0.0
+        )
+        delta_std = math.sqrt(delta_variance) if delta_variance > 0 else 0.0
+        avg_l2_volume = sum(l2_volumes) / len(l2_volumes) if l2_volumes else 0.0
+        sweep_hits = 0
+        for d, lv in zip(abs_deltas, l2_volumes):
+            if d >= (mean_abs_delta + delta_std) and lv >= (avg_l2_volume * 1.2):
+                sweep_hits += 1
+        sweep_intensity = self._safe_div(float(sweep_hits), float(len(window)), 0.0)
+
+        # Last-delta z-score for exhaustion checks.
+        delta_mean = sum(deltas) / len(deltas) if deltas else 0.0
+        delta_var = (
+            sum((d - delta_mean) ** 2 for d in deltas) / len(deltas)
+            if deltas else 0.0
+        )
+        delta_sigma = math.sqrt(delta_var) if delta_var > 0 else 0.0
+        last_delta = deltas[-1] if deltas else 0.0
+        delta_zscore = self._safe_div(last_delta - delta_mean, delta_sigma, 0.0)
+
+        realized_volatility_pct = 0.0
+        if close_to_close_pct:
+            mean_ret = sum(close_to_close_pct) / len(close_to_close_pct)
+            var_ret = sum((r - mean_ret) ** 2 for r in close_to_close_pct) / len(close_to_close_pct)
+            realized_volatility_pct = math.sqrt(var_ret)
+        vol_floor = max(realized_volatility_pct, 0.05)
+        normalized_price = price_change_pct / vol_floor
+        delta_price_divergence = signed_aggression - normalized_price
+
+        flow_score = 100.0 * (
+            0.28 * self._safe_div(abs(cumulative_delta), abs(cumulative_delta) + 5000.0, 0.0)
+            + 0.22 * max(0.0, min(1.0, directional_consistency))
+            + 0.20 * max(0.0, min(1.0, abs(avg_imbalance)))
+            + 0.15 * max(0.0, min(1.0, sweep_intensity))
+            + 0.15 * max(0.0, min(1.0, participation_ratio))
+        )
+
+        return {
+            "has_l2_coverage": bool(has_l2_coverage),
+            "bars_with_l2": float(bars_with_l2),
+            "lookback_bars": float(len(window)),
+            "cumulative_delta": cumulative_delta,
+            "delta_acceleration": delta_acceleration,
+            "delta_zscore": delta_zscore,
+            "imbalance_avg": avg_imbalance,
+            "iceberg_bias": iceberg_bias_sum,
+            "participation_ratio": participation_ratio,
+            "directional_consistency": directional_consistency,
+            "signed_aggression": signed_aggression,
+            "absorption_rate": absorption_rate,
+            "sweep_intensity": sweep_intensity,
+            "price_change_pct": price_change_pct,
+            "realized_volatility_pct": realized_volatility_pct,
+            "delta_price_divergence": delta_price_divergence,
+            "flow_score": flow_score,
+        }
     
     def _select_strategies(self, session: TradingSession) -> List[str]:
         """Select active strategies for the detected regime and ticker."""
         regime = session.detected_regime or Regime.MIXED
+        micro_regime = (session.micro_regime or "MIXED").upper()
         ticker = session.ticker.upper()
         ticker_cfg = self.ticker_params.get(ticker.upper(), {})
 
@@ -748,9 +1233,17 @@ class DayTradingManager:
         if backup:
             candidates.append(backup)
 
+        # Flow-first micro-regime preferences.
+        candidates.extend(self.micro_regime_preference.get(micro_regime, []))
+
         ticker_prefs = self.ticker_preferences.get(ticker, {})
         candidates.extend(ticker_prefs.get(regime, []))
         candidates.extend(self.default_preference.get(regime, []))
+
+        # If L2 coverage is present on current bars, bias toward flow strategies.
+        flow_metrics = self._calculate_order_flow_metrics(session.bars, lookback=min(20, len(session.bars)))
+        if flow_metrics.get("has_l2_coverage", False):
+            candidates = ['momentum_flow', 'absorption_reversal', 'exhaustion_fade'] + candidates
 
         filtered: List[str] = []
         seen = set()
@@ -985,6 +1478,92 @@ class DayTradingManager:
                 adx_series[i] = round(adx, 2)
         
         return adx_series
+
+    def _maybe_refresh_regime(
+        self,
+        session: TradingSession,
+        current_bar_index: int,
+        timestamp: datetime,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Re-evaluate regime every N bars during trading.
+        Returns update payload only when macro/micro regime or strategy set changed.
+        """
+        if current_bar_index < 0:
+            return None
+        if session.last_regime_refresh_bar_index >= 0:
+            bars_since_refresh = current_bar_index - session.last_regime_refresh_bar_index
+            if bars_since_refresh < max(3, int(session.regime_refresh_bars)):
+                return None
+        if len(session.bars) < 20:
+            return None
+
+        prev_macro = session.detected_regime or Regime.MIXED
+        prev_micro = session.micro_regime
+        prev_active = list(session.active_strategies)
+
+        new_macro = self._detect_regime(session)
+        session.detected_regime = new_macro
+        new_active = self._select_strategies(session)
+        session.active_strategies = new_active
+        session.selected_strategy = (
+            "adaptive" if len(new_active) > 1 else (new_active[0] if new_active else None)
+        )
+        session.last_regime_refresh_bar_index = current_bar_index
+
+        changed = (
+            new_macro != prev_macro
+            or session.micro_regime != prev_micro
+            or new_active != prev_active
+        )
+        if not changed:
+            return None
+
+        indicators = self._calculate_indicators(session.bars[-80:] if len(session.bars) >= 80 else session.bars)
+        flow = indicators.get("order_flow") or {}
+        payload = {
+            "timestamp": timestamp.isoformat(),
+            "bar_index": current_bar_index,
+            "regime": new_macro.value,
+            "micro_regime": session.micro_regime,
+            "strategies": list(new_active),
+            "strategy": session.selected_strategy,
+            "previous_regime": prev_macro.value,
+            "previous_micro_regime": prev_micro,
+            "indicators": {
+                "trend_efficiency": self._calc_trend_efficiency(session.bars),
+                "volatility": self._calc_volatility(session.bars),
+                "atr": indicators.get("atr", [0])[-1] if indicators.get("atr") else 0,
+                "adx": indicators.get("adx", [0])[-1] if indicators.get("adx") else 0,
+                "flow_score": float(flow.get("flow_score", 0.0) or 0.0),
+                "signed_aggression": float(flow.get("signed_aggression", 0.0) or 0.0),
+                "absorption_rate": float(flow.get("absorption_rate", 0.0) or 0.0),
+            },
+        }
+        session.regime_history.append(payload)
+        return payload
+
+    def _strategy_edge_adjustment(self, session: TradingSession, strategy_key: str) -> float:
+        """Estimate strategy edge from already realized session trades."""
+        relevant = [
+            t for t in session.trades
+            if self._canonical_strategy_key(getattr(t, "strategy", "")) == strategy_key
+        ]
+        if not relevant:
+            return 0.0
+
+        wins = [t for t in relevant if t.pnl_pct > 0]
+        losses = [t for t in relevant if t.pnl_pct <= 0]
+        n = len(relevant)
+        # Smoothed win rate to avoid unstable first trades.
+        win_rate = (len(wins) + 1.0) / (n + 2.0)
+        avg_win = (sum(t.pnl_pct for t in wins) / len(wins)) if wins else 0.0
+        avg_loss = (abs(sum(t.pnl_pct for t in losses)) / len(losses)) if losses else 0.0
+        expectancy = (win_rate * avg_win) - ((1.0 - win_rate) * avg_loss)
+        pf = (sum(t.pnl_pct for t in wins) / abs(sum(t.pnl_pct for t in losses))) if losses else (2.0 if wins else 0.0)
+
+        edge = ((win_rate - 0.5) * 36.0) + ((pf - 1.0) * 6.0) + (expectancy * 4.0)
+        return max(-12.0, min(12.0, edge))
     
     def _process_trading_bar(
         self, 
@@ -993,54 +1572,49 @@ class DayTradingManager:
         timestamp: datetime
     ) -> Dict[str, Any]:
         """Process a trading bar - manage positions and generate signals."""
-        result = {'action': 'trading'}
+        result = {'action': 'trading', 'micro_regime': session.micro_regime}
         current_price = bar.close
+        current_bar_index = max(0, len(session.bars) - 1)
+        session_key = self._get_session_key(session.run_id, session.ticker, session.date)
+
+        # Execute previous-bar signal at current bar open (no same-bar signal fill).
+        if session.pending_signal and not session.active_position:
+            signal = session.pending_signal
+            position = self._open_position(
+                session,
+                signal,
+                entry_price=bar.open,
+                entry_time=timestamp,
+                signal_bar_index=session.pending_signal_bar_index,
+                entry_bar_index=current_bar_index,
+            )
+            session.pending_signal = None
+            session.pending_signal_bar_index = -1
+            self.last_trade_bar_index[session_key] = current_bar_index
+            result['action'] = 'position_opened'
+            result['position'] = position.to_dict()
+            result['position_opened'] = {
+                'entry_price': position.entry_price,
+                'side': position.side,
+                'strategy': position.strategy_name,
+                'size': position.size,
+                'stop_loss': position.stop_loss,
+                'take_profit': position.take_profit,
+                'reasoning': signal.reasoning,
+                'confidence': signal.confidence,
+                'metadata': signal.metadata
+            }
         
         # If we have an active position, manage it
         if session.active_position:
             pos = session.active_position
-            
-            # Update trailing stop
-            if pos.trailing_stop_active:
-                if pos.side == 'long':
-                    if current_price > pos.highest_price:
-                        pos.highest_price = current_price
-                    new_stop = pos.highest_price * (1 - session.trailing_stop_pct / 100)
-                    if new_stop > pos.trailing_stop_price:
-                        pos.trailing_stop_price = new_stop
-                else:
-                    if current_price < pos.lowest_price:
-                        pos.lowest_price = current_price
-                    new_stop = pos.lowest_price * (1 + session.trailing_stop_pct / 100)
-                    if new_stop < pos.trailing_stop_price or pos.trailing_stop_price == 0:
-                        pos.trailing_stop_price = new_stop
-            
-            # Check for exit conditions
-            exit_reason = None
-            
-            # Trailing stop check
-            if pos.trailing_stop_active and pos.trailing_stop_price > 0:
-                if pos.side == 'long' and bar.low <= pos.trailing_stop_price:
-                    exit_reason = 'trailing_stop'
-                elif pos.side == 'short' and bar.high >= pos.trailing_stop_price:
-                    exit_reason = 'trailing_stop'
-            
-            # Stop loss check
-            if not exit_reason and pos.stop_loss > 0:
-                if pos.side == 'long' and bar.low <= pos.stop_loss:
-                    exit_reason = 'stop_loss'
-                elif pos.side == 'short' and bar.high >= pos.stop_loss:
-                    exit_reason = 'stop_loss'
-            
-            # Take profit check
-            if not exit_reason and pos.take_profit > 0:
-                if pos.side == 'long' and bar.high >= pos.take_profit:
-                    exit_reason = 'take_profit'
-                elif pos.side == 'short' and bar.low <= pos.take_profit:
-                    exit_reason = 'take_profit'
-            
-            if exit_reason:
-                trade = self._close_position(session, current_price, timestamp, exit_reason)
+
+            # Check exits using existing stops first (conservative intrabar fill).
+            exit = self._resolve_exit_for_bar(pos, bar)
+            if exit:
+                exit_reason, exit_fill_price = exit
+                trade = self._close_position(session, exit_fill_price, timestamp, exit_reason)
+                session.last_exit_bar_index = current_bar_index
                 result['trade_closed'] = trade.to_dict()
                 result['action'] = f'position_closed_{exit_reason}'
                 # Include position_closed info for frontend markers with detailed data
@@ -1056,6 +1630,10 @@ class DayTradingManager:
                     'exit_time': trade.exit_time.isoformat(),
                     'size': trade.size,
                     'bars_held': len([b for b in session.bars if b.timestamp >= trade.entry_time and b.timestamp <= trade.exit_time]),
+                    'signal_bar_index': trade.signal_bar_index,
+                    'entry_bar_index': trade.entry_bar_index,
+                    'signal_timestamp': trade.signal_timestamp,
+                    'signal_price': trade.signal_price,
                     'costs': {
                         'slippage': round(trade.slippage, 4),
                         'commission': round(trade.commission, 4),
@@ -1065,6 +1643,10 @@ class DayTradingManager:
                         'total': round(trade.total_costs, 4)
                     }
                 }
+
+            # Trailing stop updates are based on close and become effective next bar.
+            if session.active_position:
+                self._update_trailing_from_close(session, session.active_position, bar)
         
         # Custom Rule: Max Daily Loss Circuit Breaker
         current_pnl = sum(t.pnl_dollars for t in session.trades)
@@ -1090,11 +1672,17 @@ class DayTradingManager:
              return result
 
 
+        regime_update = self._maybe_refresh_regime(session, current_bar_index, timestamp)
+        if regime_update:
+            result['regime_update'] = regime_update
+            result['regime'] = regime_update.get("regime")
+            result['micro_regime'] = regime_update.get("micro_regime")
+            result['strategies'] = regime_update.get("strategies", [])
+            result['strategy'] = regime_update.get("strategy")
+            result['indicators'] = regime_update.get("indicators", {})
+
         if not session.active_position and session.selected_strategy:
             # Check trade limits
-            session_key = self._get_session_key(session.run_id, session.ticker, session.date)
-            current_bar_index = len(session.bars)
-            
             # Check max trades per day
             if len(session.trades) >= self.max_trades_per_day:
                 result['action'] = 'trade_limit_reached'
@@ -1122,33 +1710,276 @@ class DayTradingManager:
                     result['reason'] = f'Hour {bar_hour}:00 not in allowed hours {trading_hours}'
                     return result
             
-            signal = self._generate_signal(session, bar, timestamp)
-            
-            if signal:
+            # ── Multi-Layer Decision Engine ──────────────────────────
+            bars_data = session.bars[-100:] if len(session.bars) >= 100 else session.bars
+            ohlcv = {
+                'open': [b.open for b in bars_data],
+                'high': [b.high for b in bars_data],
+                'low': [b.low for b in bars_data],
+                'close': [b.close for b in bars_data],
+                'volume': [b.volume for b in bars_data]
+            }
+            indicators = self._calculate_indicators(bars_data)
+            regime = session.detected_regime or Regime.MIXED
+            flow_metrics = indicators.get('order_flow') or {}
+
+            ticker_cfg = self.ticker_params.get(session.ticker.upper(), {})
+            is_long_only = bool(ticker_cfg.get("long_only", False))
+
+            # Wrap existing signal generation as a callback for Layer 2
+            def gen_signal_fn():
+                return self._generate_signal(session, bar, timestamp)
+
+            ml_engine = session.multi_layer or self.multi_layer
+            decision = ml_engine.evaluate(
+                ohlcv=ohlcv,
+                indicators=indicators,
+                regime=regime,
+                strategies=self.strategies,
+                active_strategy_names=session.active_strategies,
+                current_price=current_price,
+                timestamp=timestamp,
+                ticker=session.ticker,
+                generate_signal_fn=gen_signal_fn,
+                is_long_only=is_long_only,
+            )
+
+            # Always report detected patterns for frontend visibility
+            if decision.patterns:
+                result['patterns_detected'] = [p.to_dict() for p in decision.patterns]
+
+            # Always report layer scores
+            result['layer_scores'] = {
+                'pattern_score': round(decision.pattern_score, 1),
+                'strategy_score': round(decision.strategy_score, 1),
+                'combined_score': round(decision.combined_score, 1),
+                'threshold': decision.threshold,
+                'pattern_weight': round(ml_engine.pattern_weight, 3),
+                'strategy_weight': round(ml_engine.strategy_weight, 3),
+                'flow_score': round(float(flow_metrics.get('flow_score', 0.0) or 0.0), 1),
+                'micro_regime': session.micro_regime,
+                'passed': decision.execute,
+            }
+
+            if decision.execute and decision.signal:
+                signal = decision.signal
+                l2_passed, l2_metrics = self._passes_l2_confirmation(session, signal)
+                result['l2_confirmation'] = l2_metrics
+
+                if not l2_passed:
+                    result['action'] = 'l2_filtered'
+                    result['reason'] = l2_metrics.get('reason', 'l2_confirmation_failed')
+                    return result
+
+                signal.metadata.setdefault('l2_confirmation', l2_metrics)
                 session.signals.append(signal)
                 result['signal'] = signal.to_dict()
                 result['signals'] = [signal.to_dict()]  # Array format for frontend
-                
-                # Execute signal
+
+                # Queue signal for next bar open (no same-bar execution).
                 if signal.signal_type in [SignalType.BUY, SignalType.SELL]:
-                    position = self._open_position(session, signal)
-                    self.last_trade_bar_index[session_key] = current_bar_index
-                    result['action'] = 'position_opened'
-                    result['position'] = position.to_dict()
-                    # Include position_opened info for frontend markers
-                    result['position_opened'] = {
-                        'entry_price': position.entry_price,
-                        'side': position.side,
-                        'strategy': position.strategy_name,
-                        'size': position.size,
-                        'stop_loss': position.stop_loss,
-                        'take_profit': position.take_profit,
-                        'reasoning': signal.reasoning,
-                        'confidence': signal.confidence,
-                        'metadata': signal.metadata
-                    }
-        
+                    session.pending_signal = signal
+                    session.pending_signal_bar_index = current_bar_index
+                    result['action'] = 'signal_queued'
+                    result['queued_for_next_bar'] = True
+
         return result
+
+    def _effective_stop_for_position(self, pos: Position) -> tuple[Optional[float], Optional[str]]:
+        """Return effective stop level and reason for the current side."""
+        candidates: List[tuple] = []
+        if pos.stop_loss and pos.stop_loss > 0:
+            candidates.append(("stop_loss", float(pos.stop_loss)))
+        if pos.trailing_stop_active and pos.trailing_stop_price and pos.trailing_stop_price > 0:
+            candidates.append(("trailing_stop", float(pos.trailing_stop_price)))
+
+        if not candidates:
+            return None, None
+
+        if pos.side == 'long':
+            reason, level = max(candidates, key=lambda x: x[1])
+        else:
+            reason, level = min(candidates, key=lambda x: x[1])
+        return level, reason
+
+    def _resolve_exit_for_bar(self, pos: Position, bar: BarData) -> Optional[tuple]:
+        """
+        Resolve exit for the current bar with conservative tie-break:
+        if both stop and target are hit, stop wins.
+        """
+        stop_level, stop_reason = self._effective_stop_for_position(pos)
+        if pos.side == 'long':
+            stop_hit = stop_level is not None and bar.low <= stop_level
+            tp_hit = pos.take_profit > 0 and bar.high >= pos.take_profit
+        else:
+            stop_hit = stop_level is not None and bar.high >= stop_level
+            tp_hit = pos.take_profit > 0 and bar.low <= pos.take_profit
+
+        if stop_hit:
+            return (stop_reason or "stop_loss", float(stop_level))
+        if tp_hit:
+            return ("take_profit", float(pos.take_profit))
+        return None
+
+    def _update_trailing_from_close(self, session: TradingSession, pos: Position, bar: BarData) -> None:
+        """Update trailing stop from close; this will be effective on the next bar."""
+        if not pos.trailing_stop_active:
+            return
+        if pos.side == 'long':
+            if bar.close > pos.highest_price:
+                pos.highest_price = bar.close
+            new_stop = pos.highest_price * (1 - session.trailing_stop_pct / 100)
+            if new_stop > pos.trailing_stop_price:
+                pos.trailing_stop_price = new_stop
+        else:
+            if bar.close < pos.lowest_price:
+                pos.lowest_price = bar.close
+            new_stop = pos.lowest_price * (1 + session.trailing_stop_pct / 100)
+            if new_stop < pos.trailing_stop_price or pos.trailing_stop_price == 0:
+                pos.trailing_stop_price = new_stop
+
+    @staticmethod
+    def _to_float(value: Any, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _passes_l2_confirmation(self, session: TradingSession, signal: Signal) -> tuple[bool, Dict[str, Any]]:
+        """
+        Optional order-flow confirmation gate.
+
+        Uses only current/past bars (no look-ahead):
+        - summed delta over lookback
+        - mean imbalance over lookback
+        - summed iceberg bias over lookback
+        """
+        metrics: Dict[str, Any] = {
+            "enabled": bool(session.l2_confirm_enabled),
+            "lookback_bars": max(1, int(session.l2_lookback_bars)),
+            "min_delta": float(session.l2_min_delta),
+            "min_imbalance": float(session.l2_min_imbalance),
+            "min_iceberg_bias": float(session.l2_min_iceberg_bias),
+            "min_participation_ratio": float(session.l2_min_participation_ratio),
+            "min_directional_consistency": float(session.l2_min_directional_consistency),
+            "min_signed_aggression": float(session.l2_min_signed_aggression),
+            "passed": True,
+        }
+
+        if not session.l2_confirm_enabled:
+            return True, metrics
+
+        lookback = metrics["lookback_bars"]
+        window = session.bars[-lookback:] if session.bars else []
+        if not window:
+            metrics.update({"passed": False, "reason": "l2_window_empty"})
+            return False, metrics
+
+        deltas = [self._to_float(b.l2_delta, 0.0) for b in window]
+        imbalances = [self._to_float(b.l2_imbalance, 0.0) for b in window]
+        iceberg_biases = [self._to_float(b.l2_iceberg_bias, 0.0) for b in window]
+
+        has_any_l2 = any(
+            (b.l2_delta is not None)
+            or (b.l2_imbalance is not None)
+            or (b.l2_iceberg_bias is not None)
+            for b in window
+        )
+        if not has_any_l2:
+            metrics.update({"passed": False, "reason": "l2_data_missing"})
+            return False, metrics
+
+        delta_sum = float(sum(deltas))
+        imbalance_avg = float(sum(imbalances) / len(imbalances)) if imbalances else 0.0
+        iceberg_bias_sum = float(sum(iceberg_biases))
+        l2_volumes = [max(0.0, self._to_float(b.l2_volume, 0.0)) for b in window]
+        bar_volumes = [max(0.0, self._to_float(b.volume, 0.0)) for b in window]
+
+        direction = 1.0 if signal.signal_type == SignalType.BUY else -1.0
+        directional_delta = delta_sum * direction
+        directional_imbalance = imbalance_avg * direction
+        directional_iceberg_bias = iceberg_bias_sum * direction
+
+        participation_samples: List[float] = []
+        signed_aggression_samples: List[float] = []
+        directional_consistency_base = 0
+        directional_consistency_hits = 0
+
+        for b, l2_vol, bar_vol in zip(window, l2_volumes, bar_volumes):
+            if l2_vol > 0 and bar_vol > 0:
+                participation_samples.append(l2_vol / bar_vol)
+
+            delta_val = self._to_float(b.l2_delta, 0.0)
+            if l2_vol > 0:
+                signed_aggression_samples.append((delta_val / l2_vol) * direction)
+
+            # Consistency check uses delta sign first, then imbalance sign fallback.
+            if abs(delta_val) > 1e-9:
+                directional_consistency_base += 1
+                if (delta_val * direction) > 0:
+                    directional_consistency_hits += 1
+                continue
+
+            if b.l2_imbalance is not None:
+                imb_val = self._to_float(b.l2_imbalance, 0.0)
+                if abs(imb_val) > 1e-9:
+                    directional_consistency_base += 1
+                    if (imb_val * direction) > 0:
+                        directional_consistency_hits += 1
+
+        participation_avg = (
+            float(sum(participation_samples) / len(participation_samples))
+            if participation_samples else 0.0
+        )
+        signed_aggression_avg = (
+            float(sum(signed_aggression_samples) / len(signed_aggression_samples))
+            if signed_aggression_samples else 0.0
+        )
+        directional_consistency = (
+            float(directional_consistency_hits / directional_consistency_base)
+            if directional_consistency_base > 0 else 0.0
+        )
+
+        passes_delta = directional_delta >= float(session.l2_min_delta)
+        passes_imbalance = directional_imbalance >= float(session.l2_min_imbalance)
+        passes_iceberg = directional_iceberg_bias >= float(session.l2_min_iceberg_bias)
+        passes_participation = participation_avg >= float(session.l2_min_participation_ratio)
+        passes_consistency = directional_consistency >= float(session.l2_min_directional_consistency)
+        passes_signed_aggression = signed_aggression_avg >= float(session.l2_min_signed_aggression)
+        passed = bool(
+            passes_delta
+            and passes_imbalance
+            and passes_iceberg
+            and passes_participation
+            and passes_consistency
+            and passes_signed_aggression
+        )
+
+        metrics.update({
+            "window_size": len(window),
+            "delta_sum": delta_sum,
+            "imbalance_avg": imbalance_avg,
+            "iceberg_bias_sum": iceberg_bias_sum,
+            "participation_avg": participation_avg,
+            "directional_consistency": directional_consistency,
+            "signed_aggression_avg": signed_aggression_avg,
+            "directional_delta": directional_delta,
+            "directional_imbalance": directional_imbalance,
+            "directional_iceberg_bias": directional_iceberg_bias,
+            "passes_delta": passes_delta,
+            "passes_imbalance": passes_imbalance,
+            "passes_iceberg": passes_iceberg,
+            "passes_participation": passes_participation,
+            "passes_consistency": passes_consistency,
+            "passes_signed_aggression": passes_signed_aggression,
+            "passed": passed,
+        })
+
+        if not passed:
+            metrics["reason"] = "l2_confirmation_failed"
+        return passed, metrics
     
     def _generate_signal(
         self, 
@@ -1183,6 +2014,9 @@ class DayTradingManager:
         candidate_signals = []
         ticker_cfg = self.ticker_params.get(session.ticker.upper(), {})
         is_long_only = bool(ticker_cfg.get("long_only", False))
+        flow_metrics = indicators.get("order_flow") or {}
+        flow_available = bool(flow_metrics.get("has_l2_coverage", False))
+        flow_strategy_keys = {"absorption_reversal", "momentum_flow", "exhaustion_fade"}
 
         for strategy_name in active_strategies:
             if strategy_name not in self.strategies:
@@ -1203,6 +2037,15 @@ class DayTradingManager:
             if signal:
                 if is_long_only and signal.signal_type == SignalType.SELL:
                     continue
+                strategy_key = self._canonical_strategy_key(signal.strategy_name)
+                edge_adjustment = self._strategy_edge_adjustment(session, strategy_key)
+                original_confidence = float(signal.confidence)
+                signal.confidence = max(1.0, min(100.0, original_confidence + edge_adjustment))
+                signal.metadata.setdefault("confidence_adjustment", {
+                    "base_confidence": original_confidence,
+                    "edge_adjustment": edge_adjustment,
+                    "adjusted_confidence": signal.confidence,
+                })
                 candidate_signals.append(signal)
         
         if not candidate_signals:
@@ -1225,7 +2068,11 @@ class DayTradingManager:
             if recent:
                 perf_bonus = max(-8.0, min(8.0, (sum(recent) / len(recent)) * 2.0))
 
-            score = float(sig.confidence) + preference_bonus + perf_bonus
+            flow_bonus = 0.0
+            if flow_available:
+                flow_bonus = 8.0 if key in flow_strategy_keys else -2.5
+
+            score = float(sig.confidence) + preference_bonus + perf_bonus + flow_bonus
             scored.append((score, sig))
         scored.sort(key=lambda item: item[0], reverse=True)
         best_signal = scored[0][1]
@@ -1235,7 +2082,7 @@ class DayTradingManager:
     def _calculate_indicators(self, bars: List[BarData]) -> Dict[str, Any]:
         """Calculate indicators from bars."""
         if len(bars) < 5:
-            return {}
+            return {"order_flow": self._calculate_order_flow_metrics(bars, lookback=len(bars) or 1)}
         
         closes = [b.close for b in bars]
         highs = [b.high for b in bars]
@@ -1327,29 +2174,49 @@ class DayTradingManager:
         # Calculate ADX series incrementally (point-in-time, no look-ahead)
         adx_series = self._calc_adx_series(bars, 14)
         indicators['adx'] = adx_series if adx_series else [0.0] * len(closes)
+
+        # Flow metrics are computed from current/past bars only.
+        indicators['order_flow'] = self._calculate_order_flow_metrics(bars, lookback=min(24, len(bars)))
         
         return indicators
     
-    def _open_position(self, session: TradingSession, signal: Signal) -> Position:
+    def _open_position(
+        self,
+        session: TradingSession,
+        signal: Signal,
+        entry_price: Optional[float] = None,
+        entry_time: Optional[datetime] = None,
+        signal_bar_index: Optional[int] = None,
+        entry_bar_index: Optional[int] = None,
+    ) -> Position:
         """Open a new position from signal."""
         side = 'long' if signal.signal_type == SignalType.BUY else 'short'
+        fill_price = float(entry_price if entry_price is not None else signal.price)
+        fill_time = entry_time or signal.timestamp
         capital_usd = max(0.0, session.account_size_usd)
-        size = round(capital_usd / signal.price, 4) if signal.price > 0 else 0.0
+        size = round(capital_usd / fill_price, 4) if fill_price > 0 else 0.0
         if size <= 0:
             size = 0.0
         
         position = Position(
             strategy_name=signal.strategy_name,
-            entry_price=signal.price,
-            entry_time=signal.timestamp,
+            entry_price=fill_price,
+            entry_time=fill_time,
             side=side,
             size=size,  # Full notional allocation
             stop_loss=signal.stop_loss or 0,
             take_profit=signal.take_profit or 0,
             trailing_stop_active=signal.trailing_stop,
-            highest_price=signal.price if side == 'long' else 0,
-            lowest_price=signal.price if side == 'short' else float('inf')
+            highest_price=fill_price if side == 'long' else 0,
+            lowest_price=fill_price if side == 'short' else float('inf')
         )
+        # Optional audit metadata (keeps backwards compatibility).
+        if signal_bar_index is not None:
+            position.signal_bar_index = signal_bar_index
+        if entry_bar_index is not None:
+            position.entry_bar_index = entry_bar_index
+        position.signal_timestamp = signal.timestamp.isoformat()
+        position.signal_price = signal.price
         
         session.active_position = position
         session.trailing_stop_pct = signal.trailing_stop_pct or 0.8
@@ -1384,7 +2251,8 @@ class DayTradingManager:
         
         # Net PnL after costs
         net_pnl_dollars = gross_pnl_dollars - costs['total']
-        net_pnl_pct = net_pnl_dollars / (pos.entry_price * pos.size) * 100
+        notional = pos.entry_price * pos.size
+        net_pnl_pct = (net_pnl_dollars / notional * 100) if notional > 0 else 0.0
         
         session.trade_counter += 1
         trade = DayTrade(
@@ -1406,7 +2274,11 @@ class DayTradingManager:
             sec_fee=costs.get('sec_fee', 0.0),
             finra_fee=costs.get('finra_fee', 0.0),
             total_costs=costs.get('total', 0.0),
-            gross_pnl_pct=gross_pnl_pct
+            gross_pnl_pct=gross_pnl_pct,
+            signal_bar_index=getattr(pos, "signal_bar_index", None),
+            entry_bar_index=getattr(pos, "entry_bar_index", None),
+            signal_timestamp=getattr(pos, "signal_timestamp", None),
+            signal_price=getattr(pos, "signal_price", None),
         )
         
         session.trades.append(trade)
@@ -1424,6 +2296,7 @@ class DayTradingManager:
                 'ticker': session.ticker,
                 'date': session.date,
                 'regime': session.detected_regime.value if session.detected_regime else None,
+                'micro_regime': session.micro_regime,
                 'strategy': session.selected_strategy,
                 'total_trades': 0,
                 'total_pnl_pct': 0,
@@ -1438,6 +2311,7 @@ class DayTradingManager:
             'date': session.date,
             'run_id': session.run_id,
             'regime': session.detected_regime.value if session.detected_regime else None,
+            'micro_regime': session.micro_regime,
             'strategy': session.selected_strategy,
             'total_trades': len(trades),
             'winning_trades': len(winning),
@@ -1450,8 +2324,8 @@ class DayTradingManager:
             'worst_trade': round(min(t.pnl_pct for t in trades), 2) if trades else 0,
             'bars_processed': len(session.bars),
             'pre_market_bars': len(session.pre_market_bars),
+            'regime_history': list(session.regime_history),
             'success': session.total_pnl > 0,
-            'trades': [t.to_dict() for t in trades]
         }
     
     def get_all_sessions(self) -> Dict[str, Dict[str, Any]]:

@@ -164,7 +164,6 @@ class MeanReversionStrategy(BaseStrategy):
         
         # SHORT SIGNAL: Price above VWAP (overbought)
         elif vwap_distance_pct >= threshold:
-            print(f"DEBUG: Checking SHORT signal. Dist: {vwap_distance_pct}")
             # Confirm with RSI
             if rsi_val > 65:
                 confidence += 20

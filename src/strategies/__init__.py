@@ -11,6 +11,10 @@ from .rotation import RotationStrategy
 from .vwap_magnet import VWAPMagnetStrategy
 from .volume_profile import VolumeProfileStrategy
 from .gap_liquidity import GapLiquidityStrategy
+from .absorption_reversal import AbsorptionReversalStrategy
+from .momentum_flow import MomentumFlowStrategy
+from .exhaustion_fade import ExhaustionFadeStrategy
+from .candlestick_patterns import CandlestickPatternDetector, DetectedPattern, PatternDirection
 
 __all__ = [
     'BaseStrategy',
@@ -25,5 +29,10 @@ __all__ = [
     'VWAPMagnetStrategy',
     'VolumeProfileStrategy',
     'GapLiquidityStrategy',
+    'AbsorptionReversalStrategy',
+    'MomentumFlowStrategy',
+    'ExhaustionFadeStrategy',
+    'CandlestickPatternDetector',
+    'DetectedPattern',
+    'PatternDirection',
 ]
-
