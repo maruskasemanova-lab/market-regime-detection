@@ -4,15 +4,21 @@ Connects to the existing backtest API on localhost:8000.
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import uvicorn
 from datetime import datetime
 
+from src.api_models import (
+    BarInput,
+    MultiLayerConfig,
+    SessionQuery,
+    StrategyToggle,
+    StrategyUpdate,
+    TradingConfig,
+)
+from src.api_utils import coerce_regimes, get_regime_description, normalize_strategy_name
 from src.strategy_engine import StrategyEngine
 from src.day_trading_manager import DayTradingManager
-from src.strategies.base_strategy import Regime
 
 
 
@@ -37,65 +43,6 @@ engine = StrategyEngine(backtest_api_url="http://localhost:8000")
 
 # Day trading manager for session-based API
 day_trading_manager = DayTradingManager(regime_detection_minutes=5)
-
-
-# ============ Pydantic Models ============
-
-class StrategyToggle(BaseModel):
-    strategy_name: str
-    enabled: bool
-    
-
-class StrategyUpdate(BaseModel):
-    strategy_name: str
-    params: Dict[str, Any]
-
-
-class TrailingStopConfig(BaseModel):
-    stop_type: str = "PERCENT"
-    initial_stop_pct: float = 2.0
-    trailing_pct: float = 0.8
-    atr_multiplier: float = 2.0
-
-
-class BarInput(BaseModel):
-    """Input model for processing a single bar."""
-    run_id: str
-    ticker: str
-    timestamp: str  # ISO format datetime
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-    vwap: Optional[float] = None
-    l2_delta: Optional[float] = None
-    l2_buy_volume: Optional[float] = None
-    l2_sell_volume: Optional[float] = None
-    l2_volume: Optional[float] = None
-    l2_imbalance: Optional[float] = None
-    l2_iceberg_buy_count: Optional[float] = None
-    l2_iceberg_sell_count: Optional[float] = None
-    l2_iceberg_bias: Optional[float] = None
-
-
-class SessionQuery(BaseModel):
-    """Query model for session operations."""
-    run_id: str
-    ticker: str
-    date: str  # YYYY-MM-DD format
-
-
-class StrategyToggle(BaseModel):
-    strategy_name: str
-    enabled: bool
-
-
-class TrailingStopConfig(BaseModel):
-    stop_type: str = "PERCENT"
-    initial_stop_pct: float = 2.0
-    trailing_pct: float = 0.8
-    atr_multiplier: float = 2.0
 
 
 # ============ API Endpoints ============
@@ -124,34 +71,11 @@ async def get_regime():
         
         return {
             "regime": regime.value,
-            "description": _get_regime_description(regime.value),
+            "description": get_regime_description(regime.value),
             "active_strategies": [s.name for s in engine.get_active_strategies(regime)]
         }
     
     return {"regime": "MIXED", "error": "Could not fetch data"}
-
-
-def _get_regime_description(regime: str) -> str:
-    descriptions = {
-        "TRENDING": "Strong directional movement. Pullback and Momentum strategies preferred.",
-        "CHOPPY": "Range-bound, low trend efficiency. Mean Reversion and VWAP Magnet strategies preferred.",
-        "MIXED": "Uncertain direction. Rotation and conservative strategies preferred."
-    }
-    return descriptions.get(regime, "Unknown regime")
-
-
-def _coerce_regimes(reg_list):
-    """Accept list of Regime enums or strings; return list[Regime]."""
-    normalized = []
-    for r in reg_list:
-        if isinstance(r, Regime):
-            normalized.append(r)
-        else:
-            try:
-                normalized.append(Regime[str(r).upper()])
-            except Exception:
-                continue
-    return normalized
 
 
 @app.get("/api/strategies")
@@ -160,10 +84,10 @@ async def get_strategies():
     # Normalize allowed_regimes to Regime enums to avoid serialization errors
     for strat in engine.strategies.values():
         if hasattr(strat, "allowed_regimes"):
-            strat.allowed_regimes = _coerce_regimes(getattr(strat, "allowed_regimes"))
+            strat.allowed_regimes = coerce_regimes(getattr(strat, "allowed_regimes"))
     for strat in day_trading_manager.strategies.values():
         if hasattr(strat, "allowed_regimes"):
-            strat.allowed_regimes = _coerce_regimes(getattr(strat, "allowed_regimes"))
+            strat.allowed_regimes = coerce_regimes(getattr(strat, "allowed_regimes"))
     return {
         name: strategy.to_dict() 
         for name, strategy in engine.strategies.items()
@@ -173,7 +97,7 @@ async def get_strategies():
 @app.post("/api/strategies/toggle")
 async def toggle_strategy(config: StrategyToggle):
     """Enable or disable a strategy."""
-    strat_name = config.strategy_name.lower().replace(' ', '_')
+    strat_name = normalize_strategy_name(config.strategy_name)
     
     if strat_name not in engine.strategies:
         raise HTTPException(status_code=404, detail=f"Strategy {config.strategy_name} not found")
@@ -193,7 +117,7 @@ async def toggle_strategy(config: StrategyToggle):
 @app.post("/api/strategies/update")
 async def update_strategy(config: StrategyUpdate):
     """Update editable parameters of a strategy (numeric fields + allowed_regimes)."""
-    strat_name = config.strategy_name.lower().replace(' ', '_')
+    strat_name = normalize_strategy_name(config.strategy_name)
     
     if strat_name not in engine.strategies:
         raise HTTPException(status_code=404, detail=f"Strategy {config.strategy_name} not found")
@@ -204,7 +128,7 @@ async def update_strategy(config: StrategyUpdate):
     updated_fields = {}
     for key, val in config.params.items():
         if key == "allowed_regimes" and isinstance(val, list):
-            regimes = _coerce_regimes(val)
+            regimes = coerce_regimes(val)
             setattr(strat, "allowed_regimes", regimes)
             updated_fields[key] = [r.value for r in regimes]
             if dtm_strat:
@@ -432,16 +356,6 @@ async def clear_session(run_id: str, ticker: str, date: str):
     return {"message": "Session cleared", "run_id": run_id, "ticker": ticker, "date": date}
 
 
-class TradingConfig(BaseModel):
-    """Global trading configuration."""
-    regime_detection_minutes: int = 60
-    regime_refresh_bars: int = 12
-    max_daily_loss: float = 300.0
-    max_trades_per_day: int = 3
-    trade_cooldown_bars: int = 15
-    account_size_usd: float = 10000.0
-
-
 @app.get("/api/config/trading")
 async def get_trading_config():
     """Get current global trading configuration."""
@@ -526,21 +440,6 @@ async def configure_session(
 
 
 # ============ Multi-Layer Decision Engine Config ============
-
-
-class MultiLayerConfig(BaseModel):
-    """Configuration for the multi-layer decision engine."""
-    pattern_weight: Optional[float] = None
-    strategy_weight: Optional[float] = None
-    threshold: Optional[float] = None
-    require_pattern: Optional[bool] = None
-    # Candlestick pattern detector settings
-    body_doji_pct: Optional[float] = None
-    wick_ratio_hammer: Optional[float] = None
-    engulfing_min_body_pct: Optional[float] = None
-    volume_confirm_ratio: Optional[float] = None
-    vwap_proximity_pct: Optional[float] = None
-
 
 @app.get("/api/multilayer/config")
 async def get_multilayer_config():

@@ -15,18 +15,8 @@ import re
 logger = logging.getLogger(__name__)
 
 from .strategies.base_strategy import BaseStrategy, Signal, SignalType, Position, Regime
-from .strategies.trailing_stop import TrailingStopManager, TrailingStopConfig, StopType
-from .strategies.mean_reversion import MeanReversionStrategy
-from .strategies.pullback import PullbackStrategy
-from .strategies.momentum import MomentumStrategy
-from .strategies.rotation import RotationStrategy
-from .strategies.vwap_magnet import VWAPMagnetStrategy
-from .strategies.volume_profile import VolumeProfileStrategy
-from .strategies.gap_liquidity import GapLiquidityStrategy
-from .strategies.absorption_reversal import AbsorptionReversalStrategy
-from .strategies.momentum_flow import MomentumFlowStrategy
-from .strategies.exhaustion_fade import ExhaustionFadeStrategy
 from .multi_layer_decision import MultiLayerDecision
+from .strategy_factory import build_strategy_registry
 
 
 class SessionPhase(Enum):
@@ -321,18 +311,7 @@ class DayTradingManager:
         )
 
         # Pre-configured strategies
-        self.strategies = {
-            'mean_reversion': MeanReversionStrategy(),
-            'pullback': PullbackStrategy(),
-            'momentum': MomentumStrategy(),
-            'rotation': RotationStrategy(),
-            'vwap_magnet': VWAPMagnetStrategy(),
-            'volume_profile': VolumeProfileStrategy(),
-            'gap_liquidity': GapLiquidityStrategy(),
-            'absorption_reversal': AbsorptionReversalStrategy(),
-            'momentum_flow': MomentumFlowStrategy(),
-            'exhaustion_fade': ExhaustionFadeStrategy(),
-        }
+        self.strategies = build_strategy_registry()
         
         # Strategy selection by regime
         # Default Preferences - including new volume-focused strategies
