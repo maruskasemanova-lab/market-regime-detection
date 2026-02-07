@@ -49,6 +49,13 @@ class BarInput(BaseModel):
     l2_iceberg_buy_count: Optional[float] = None
     l2_iceberg_sell_count: Optional[float] = None
     l2_iceberg_bias: Optional[float] = None
+    # Cross-asset reference bar (optional, e.g. QQQ)
+    ref_ticker: Optional[str] = None
+    ref_open: Optional[float] = None
+    ref_high: Optional[float] = None
+    ref_low: Optional[float] = None
+    ref_close: Optional[float] = None
+    ref_volume: Optional[float] = None
 
 
 class SessionQuery(BaseModel):
@@ -87,6 +94,7 @@ class MultiLayerConfig(BaseModel):
     pattern_weight: Optional[float] = None
     strategy_weight: Optional[float] = None
     threshold: Optional[float] = None
+    strategy_only_threshold: Optional[float] = None
     require_pattern: Optional[bool] = None
     # Candlestick pattern detector settings
     body_doji_pct: Optional[float] = None

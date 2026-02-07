@@ -4,6 +4,7 @@ Connects to the existing backtest API on localhost:8000.
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 import uvicorn
 from datetime import datetime
@@ -284,7 +285,24 @@ async def process_bar(bar: BarInput):
         timestamp=timestamp,
         bar_data=bar_data
     )
-    
+
+    # Feed cross-asset reference bar to orchestrator if provided
+    if bar.ref_ticker and bar.ref_close:
+        orch = day_trading_manager.orchestrator
+        if orch and orch.config.use_cross_asset:
+            ref_bar = {
+                'open': bar.ref_open or bar.ref_close,
+                'high': bar.ref_high or bar.ref_close,
+                'low': bar.ref_low or bar.ref_close,
+                'close': bar.ref_close,
+                'volume': bar.ref_volume or 0,
+            }
+            orch.update_cross_asset(bar.ref_ticker, ref_bar)
+            orch.update_target_cross_asset({
+                'close': bar.close,
+                'volume': bar.volume,
+            })
+
     return result
 
 
@@ -358,6 +376,19 @@ async def clear_session(run_id: str, ticker: str, date: str):
         raise HTTPException(status_code=404, detail="Session not found")
     
     return {"message": "Session cleared", "run_id": run_id, "ticker": ticker, "date": date}
+
+
+@app.delete("/api/session/run")
+async def clear_run_sessions(run_id: str, ticker: Optional[str] = None):
+    """Clear all sessions and run-scoped state for a run_id (optionally for one ticker)."""
+    normalized_ticker = ticker.upper() if ticker else None
+    removed = day_trading_manager.clear_sessions_for_run(run_id, normalized_ticker)
+    return {
+        "message": "Run sessions cleared",
+        "run_id": run_id,
+        "ticker": normalized_ticker,
+        "cleared_sessions": removed,
+    }
 
 
 @app.get("/api/config/trading")
@@ -526,6 +557,7 @@ async def get_multilayer_config():
         "pattern_weight": ml.pattern_weight,
         "strategy_weight": ml.strategy_weight,
         "threshold": ml.threshold,
+        "strategy_only_threshold": getattr(ml, "strategy_only_threshold", 0.0),
         "require_pattern": ml.require_pattern,
         "detector": {
             "body_doji_pct": pd.body_doji_pct,
@@ -553,6 +585,9 @@ async def update_multilayer_config(config: MultiLayerConfig):
     if config.threshold is not None:
         ml.threshold = config.threshold
         updated["threshold"] = config.threshold
+    if config.strategy_only_threshold is not None:
+        ml.strategy_only_threshold = max(0.0, float(config.strategy_only_threshold))
+        updated["strategy_only_threshold"] = ml.strategy_only_threshold
     if config.require_pattern is not None:
         ml.require_pattern = config.require_pattern
         updated["require_pattern"] = config.require_pattern
@@ -579,6 +614,157 @@ async def update_multilayer_config(config: MultiLayerConfig):
         "updated": updated,
         "current": (await get_multilayer_config()),
     }
+
+
+# ============ Orchestrator Health & Config ============
+
+
+@app.post("/api/orchestrator/reset")
+async def reset_orchestrator_state(scope: str = "all", clear_sessions: bool = True):
+    """
+    Reset orchestrator/manager state for deterministic backtests.
+
+    scope:
+      - session: feature/regime/cross-asset runtime only
+      - learning: calibrator/combiner/edge monitor only
+      - all: both runtime + learning
+    """
+    try:
+        summary = day_trading_manager.reset_backtest_state(
+            scope=scope,
+            clear_sessions=clear_sessions,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {
+        "message": "Orchestrator state reset",
+        **summary,
+    }
+
+
+@app.get("/api/system/health")
+async def get_system_health():
+    """Get orchestrator system health for observability."""
+    orch = day_trading_manager.orchestrator
+    if not orch:
+        return {"status": "orchestrator_not_initialized"}
+    return {"status": "ok", "health": orch.get_system_health()}
+
+
+@app.get("/api/orchestrator/config")
+async def get_orchestrator_config():
+    """Get current orchestrator configuration."""
+    orch = day_trading_manager.orchestrator
+    if not orch:
+        return {"status": "not_initialized"}
+    cfg = orch.config
+    return {
+        "use_evidence_engine": cfg.use_evidence_engine,
+        "use_adaptive_regime": cfg.use_adaptive_regime,
+        "use_calibration": cfg.use_calibration,
+        "use_quality_sizing": cfg.use_quality_sizing,
+        "use_cross_asset": cfg.use_cross_asset,
+        "use_edge_monitor": cfg.use_edge_monitor,
+        "min_confirming_sources": cfg.min_confirming_sources,
+        "base_threshold": cfg.base_threshold,
+        "base_risk_pct": cfg.base_risk_pct,
+    }
+
+
+@app.post("/api/orchestrator/config")
+async def update_orchestrator_config(body: Dict[str, Any]):
+    """Toggle orchestrator feature flags."""
+    orch = day_trading_manager.orchestrator
+    if not orch:
+        raise HTTPException(400, "Orchestrator not initialized")
+    cfg = orch.config
+    updated = {}
+    for flag in ('use_evidence_engine', 'use_adaptive_regime',
+                 'use_calibration', 'use_quality_sizing',
+                 'use_cross_asset', 'use_edge_monitor'):
+        if flag in body:
+            setattr(cfg, flag, bool(body[flag]))
+            updated[flag] = bool(body[flag])
+    for param in ('min_confirming_sources', 'base_threshold', 'base_risk_pct'):
+        if param in body:
+            val = float(body[param]) if param != 'min_confirming_sources' else int(body[param])
+            setattr(cfg, param, val)
+            updated[param] = val
+    return {"message": "Orchestrator config updated", "updated": updated}
+
+
+# ============ Checkpoint Persistence ============
+
+
+@app.post("/api/orchestrator/checkpoint/save")
+async def save_checkpoint(
+    run_id: Optional[str] = None,
+    ticker: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    path: Optional[str] = None,
+):
+    """Save orchestrator learning state to a checkpoint file."""
+    orch = day_trading_manager.orchestrator
+    if not orch:
+        raise HTTPException(400, "Orchestrator not initialized")
+    metadata = {
+        k: v for k, v in {
+            "run_id": run_id, "ticker": ticker,
+            "date_from": date_from, "date_to": date_to,
+        }.items() if v is not None
+    }
+    saved_path = orch.save_checkpoint(path=path, metadata=metadata)
+    return {"status": "saved", "path": saved_path}
+
+
+@app.post("/api/orchestrator/checkpoint/load")
+async def load_checkpoint_endpoint(path: str):
+    """Load orchestrator learning state from a checkpoint file."""
+    orch = day_trading_manager.orchestrator
+    if not orch:
+        raise HTTPException(400, "Orchestrator not initialized")
+    try:
+        info = orch.load_checkpoint(path)
+        return {"status": "loaded", "checkpoint": info}
+    except FileNotFoundError:
+        raise HTTPException(404, f"Checkpoint not found: {path}")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/orchestrator/checkpoints")
+async def list_checkpoints():
+    """List available checkpoint files."""
+    import json as _json
+    cp_dir = Path("data/checkpoints")
+    if not cp_dir.exists():
+        return []
+    files = sorted(cp_dir.glob("checkpoint_*.json"), reverse=True)
+    results = []
+    for f in files:
+        try:
+            data = _json.loads(f.read_text())
+            results.append({
+                "path": str(f),
+                "created_at": data.get("created_at"),
+                "source": data.get("source", {}),
+                "version": data.get("version"),
+            })
+        except Exception:
+            pass
+    return results
+
+
+@app.post("/api/orchestrator/warmup")
+async def warmup_feature_store(bars: List[Dict[str, Any]]):
+    """Feed historical bars to warm up feature store z-score windows."""
+    orch = day_trading_manager.orchestrator
+    if not orch:
+        raise HTTPException(400, "Orchestrator not initialized")
+    count = orch.warmup_feature_store(bars)
+    return {"status": "warmed_up", "bars_processed": count}
 
 
 # ============ WebSocket for real-time updates ============

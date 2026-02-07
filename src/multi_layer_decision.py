@@ -27,11 +27,22 @@ class DecisionResult:
     direction: Optional[str] = None  # 'bullish' or 'bearish'
     signal: Optional[Signal] = None
     patterns: List[DetectedPattern] = field(default_factory=list)
+    primary_pattern: Optional[str] = None  # strongest directional pattern name
     confirming_signals: List[Signal] = field(default_factory=list)
     pattern_score: float = 0.0
     strategy_score: float = 0.0
+    # combined_raw: weighted sum before normalization (can exceed 100)
+    combined_raw: float = 0.0
+    # combined_norm_0_100: normalized to 0-100 scale for comparison with threshold
+    combined_norm_0_100: float = 0.0
+    # combined_score: the value compared against threshold (= combined_norm_0_100)
     combined_score: float = 0.0
     threshold: float = 65.0
+    pattern_threshold: float = 65.0
+    trade_gate_threshold: float = 65.0
+    threshold_used_reason: str = "base_threshold"
+    # pattern_confirmed: True IFF directional patterns exist AND pattern_score >= pattern_threshold
+    pattern_confirmation: bool = False
     reasoning: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -40,11 +51,18 @@ class DecisionResult:
             'direction': self.direction,
             'signal': self.signal.to_dict() if self.signal else None,
             'patterns': [p.to_dict() for p in self.patterns],
+            'primary_pattern': self.primary_pattern,
             'confirming_signals': [s.to_dict() for s in self.confirming_signals],
             'pattern_score': round(self.pattern_score, 1),
             'strategy_score': round(self.strategy_score, 1),
+            'combined_raw': round(self.combined_raw, 2),
+            'combined_norm_0_100': round(self.combined_norm_0_100, 1),
             'combined_score': round(self.combined_score, 1),
             'threshold': self.threshold,
+            'pattern_threshold': self.pattern_threshold,
+            'trade_gate_threshold': self.trade_gate_threshold,
+            'threshold_used_reason': self.threshold_used_reason,
+            'pattern_confirmation': self.pattern_confirmation,
             'reasoning': self.reasoning,
         }
 
@@ -64,6 +82,7 @@ class MultiLayerDecision:
         strategy_weight: float = 0.6,
         threshold: float = 65.0,
         require_pattern: bool = True,
+        strategy_only_threshold: float = 0.0,
     ):
         """
         Args:
@@ -73,12 +92,17 @@ class MultiLayerDecision:
             require_pattern: If True, a pattern must be detected before strategies
                             are even consulted. If False, strategies can still
                             generate signals on their own (backward compatible).
+            strategy_only_threshold: Higher threshold applied when no candlestick
+                            pattern confirms the signal (strategy-only mode).
+                            If 0, falls back to the base threshold.
+                            Filters borderline strategy-only entries.
         """
         self.pattern_detector = CandlestickPatternDetector()
         self.pattern_weight = pattern_weight
         self.strategy_weight = strategy_weight
         self.threshold = threshold
         self.require_pattern = require_pattern
+        self.strategy_only_threshold = strategy_only_threshold
 
     def evaluate(
         self,
@@ -96,24 +120,17 @@ class MultiLayerDecision:
         """
         Run multi-layer evaluation.
 
-        Args:
-            ohlcv: OHLCV data arrays
-            indicators: Calculated indicator values
-            regime: Current market regime
-            strategies: Dict of strategy_name -> BaseStrategy instances
-            active_strategy_names: Names of strategies active for current regime
-            current_price: Current bar close price
-            timestamp: Current timestamp
-            ticker: Ticker symbol (for logging)
-            generate_signal_fn: Optional callback that returns the best Signal
-                               from active strategies (reuses existing DayTradingManager
-                               ranking logic). Signature: () -> Optional[Signal]
-            is_long_only: Whether only long trades are allowed
-
         Returns:
             DecisionResult with execution decision and full reasoning chain.
         """
-        result = DecisionResult(threshold=self.threshold)
+        result = DecisionResult(
+            threshold=self.threshold,
+            pattern_threshold=self.threshold,
+            trade_gate_threshold=(
+                self.strategy_only_threshold if self.strategy_only_threshold > 0
+                else self.threshold
+            ),
+        )
 
         # ── Layer 1: Candlestick Pattern Detection ──────────────────
         patterns = self.pattern_detector.detect(ohlcv, indicators)
@@ -162,6 +179,11 @@ class MultiLayerDecision:
 
         result.direction = dominant_direction.value if dominant_direction else None
 
+        # Identify primary (strongest) pattern for logging clarity
+        if dominant_patterns:
+            primary = max(dominant_patterns, key=lambda p: p.strength)
+            result.primary_pattern = primary.name
+
         # Long-only filter
         if is_long_only and dominant_direction == PatternDirection.BEARISH:
             result.reasoning = "Bearish pattern filtered (long-only mode)"
@@ -209,60 +231,135 @@ class MultiLayerDecision:
         result.confirming_signals = confirming_signals
 
         # ── Layer 3: Combined Scoring ───────────────────────────────
-        if patterns and confirming_signals:
-            # Both layers contribute
-            result.combined_score = (
-                self.pattern_weight * result.pattern_score
-                + self.strategy_weight * result.strategy_score
-            )
-        elif patterns and not confirming_signals:
-            # Only patterns, no strategy confirmation
-            result.combined_score = self.pattern_weight * result.pattern_score
-        elif not patterns and confirming_signals:
-            # Only strategy (require_pattern=False mode)
-            # Use raw strategy confidence when pattern gate is disabled so
-            # flow-first strategies are not artificially down-weighted.
-            result.combined_score = result.strategy_score
-        else:
-            result.combined_score = 0
+        # Compute weighted raw score and normalize to 0-100.
+        #
+        # Decomposition (logged in reasoning):
+        #   pattern_component = pattern_weight * pattern_score
+        #   strategy_component = strategy_weight * strategy_score  (or 1.0 * score in strategy-only)
+        #   combined_raw = sum of active components
+        #   max_possible_raw = sum of (weight * 100) for active layers
+        #   combined_norm = (combined_raw / max_possible_raw) * 100, clamped to [0, 100]
+        #   combined_score = combined_norm  (this is what gets compared to threshold)
 
-        # Build reasoning
-        pattern_names = [p.name for p in dominant_patterns] if dominant_patterns else []
+        has_patterns = bool(dominant_patterns and result.pattern_score > 0)
+        has_strategy = bool(confirming_signals and result.strategy_score > 0)
+
+        pattern_component = 0.0
+        strategy_component = 0.0
+        max_possible_raw = 0.0
+
+        if has_patterns and has_strategy:
+            pattern_component = self.pattern_weight * result.pattern_score
+            strategy_component = self.strategy_weight * result.strategy_score
+            max_possible_raw = (self.pattern_weight + self.strategy_weight) * 100.0
+        elif has_patterns and not has_strategy:
+            pattern_component = self.pattern_weight * result.pattern_score
+            max_possible_raw = self.pattern_weight * 100.0
+        elif not has_patterns and has_strategy:
+            # Strategy-only mode: use raw strategy confidence (weight=1.0)
+            strategy_component = result.strategy_score
+            max_possible_raw = 100.0
+
+        result.combined_raw = pattern_component + strategy_component
+
+        if max_possible_raw > 0:
+            result.combined_norm_0_100 = max(0.0, min(100.0,
+                (result.combined_raw / max_possible_raw) * 100.0
+            ))
+        else:
+            result.combined_norm_0_100 = 0.0
+
+        # The score compared against threshold is the normalized score
+        result.combined_score = result.combined_norm_0_100
+
+        # ── Pattern confirmation (strict boolean) ──────────────────
+        # A pattern "confirms" IFF:
+        #   1) directional patterns exist (not just neutral Doji)
+        #   2) pattern_score >= base threshold
+        # This determines which threshold gate to use.
+        result.pattern_confirmation = (
+            has_patterns
+            and result.pattern_score >= self.threshold
+        )
+
+        if result.pattern_confirmation:
+            effective_threshold = self.threshold
+            result.threshold_used_reason = "pattern_confirmation"
+        elif self.strategy_only_threshold > 0:
+            effective_threshold = self.strategy_only_threshold
+            result.threshold_used_reason = "no_pattern_confirmation"
+        else:
+            effective_threshold = self.threshold
+            result.threshold_used_reason = "base_threshold"
+
+        result.threshold = effective_threshold
+        result.pattern_threshold = self.threshold
+        result.trade_gate_threshold = (
+            self.strategy_only_threshold if self.strategy_only_threshold > 0
+            else self.threshold
+        )
+
+        # ── Build reasoning ────────────────────────────────────────
+        all_pattern_names = [p.name for p in patterns] if patterns else []
         strat_names = [s.strategy_name for s in confirming_signals]
 
         reasoning_parts = []
-        if pattern_names:
-            reasoning_parts.append(f"Patterns: {', '.join(pattern_names)} (score: {result.pattern_score:.0f})")
+
+        # Show all patterns with primary highlighted
+        if all_pattern_names:
+            if result.primary_pattern and len(all_pattern_names) > 1:
+                reasoning_parts.append(
+                    f"Patterns: [{', '.join(all_pattern_names)}] primary={result.primary_pattern} "
+                    f"(score: {result.pattern_score:.0f})"
+                )
+            else:
+                reasoning_parts.append(
+                    f"Pattern: {', '.join(all_pattern_names)} (score: {result.pattern_score:.0f})"
+                )
+
         if strat_names:
-            reasoning_parts.append(f"Confirmed by: {', '.join(strat_names)} (score: {result.strategy_score:.0f})")
-        reasoning_parts.append(f"Combined: {result.combined_score:.1f} vs threshold {self.threshold}")
+            reasoning_parts.append(
+                f"Strategy: {', '.join(strat_names)} (score: {result.strategy_score:.0f})"
+            )
+
+        # Decomposed combined score
+        component_parts = []
+        if pattern_component > 0:
+            component_parts.append(f"pattern={pattern_component:.1f} (w={self.pattern_weight})")
+        if strategy_component > 0:
+            sw = self.strategy_weight if has_patterns else 1.0
+            component_parts.append(f"strategy={strategy_component:.1f} (w={sw})")
+        if component_parts:
+            reasoning_parts.append(
+                f"Combined: {' + '.join(component_parts)} => "
+                f"raw={result.combined_raw:.1f} | norm={result.combined_norm_0_100:.1f}/100"
+            )
+
+        # Threshold info
+        reasoning_parts.append(
+            f"Threshold: {effective_threshold} "
+            f"(reason={result.threshold_used_reason}, "
+            f"pattern_confirmed={result.pattern_confirmation})"
+        )
 
         # ── Decision ────────────────────────────────────────────────
-        if result.combined_score >= self.threshold:
+        if result.combined_score >= effective_threshold:
             result.execute = True
             # Pick the best confirming signal to use for the trade
             if confirming_signals:
                 best_signal = max(confirming_signals, key=lambda s: s.confidence)
                 # Enrich signal metadata with pattern info
                 best_signal.metadata['patterns'] = [p.to_dict() for p in patterns]
-                best_signal.metadata['layer_scores'] = {
-                    'pattern_score': round(result.pattern_score, 1),
-                    'strategy_score': round(result.strategy_score, 1),
-                    'combined_score': round(result.combined_score, 1),
-                    'threshold': self.threshold,
-                }
+                best_signal.metadata['layer_scores'] = self._build_layer_scores_dict(result)
                 best_signal.reasoning = (
                     f"[ML] {' | '.join(reasoning_parts)} | {best_signal.reasoning}"
                 )
                 result.signal = best_signal
             elif dominant_direction and dominant_patterns:
                 # Patterns strong enough on their own (no strategy confirmation needed)
-                # Create a signal from the pattern
                 best_pattern = max(dominant_patterns, key=lambda p: p.strength)
                 atr_list = indicators.get('atr', [])
                 atr_val = atr_list[-1] if atr_list else current_price * 0.005
-                vwap_list = indicators.get('vwap', [])
-                vwap_val = vwap_list[-1] if isinstance(vwap_list, list) and vwap_list else current_price
 
                 if dominant_direction == PatternDirection.BULLISH:
                     sig_type = SignalType.BUY
@@ -286,12 +383,7 @@ class MultiLayerDecision:
                     reasoning=f"[ML] {' | '.join(reasoning_parts)}",
                     metadata={
                         'patterns': [p.to_dict() for p in patterns],
-                        'layer_scores': {
-                            'pattern_score': round(result.pattern_score, 1),
-                            'strategy_score': 0,
-                            'combined_score': round(result.combined_score, 1),
-                            'threshold': self.threshold,
-                        },
+                        'layer_scores': self._build_layer_scores_dict(result),
                     },
                 )
             reasoning_parts.append("EXECUTE")
@@ -300,3 +392,23 @@ class MultiLayerDecision:
 
         result.reasoning = " | ".join(reasoning_parts)
         return result
+
+    def _build_layer_scores_dict(self, result: DecisionResult) -> Dict[str, Any]:
+        """Build a consistent layer_scores metadata dict from DecisionResult."""
+        return {
+            'pattern_score': round(result.pattern_score, 1),
+            'strategy_score': round(result.strategy_score, 1),
+            'combined_raw': round(result.combined_raw, 2),
+            'combined_norm_0_100': round(result.combined_norm_0_100, 1),
+            'combined_score': round(result.combined_score, 1),
+            'threshold': result.threshold,
+            'pattern_threshold': result.pattern_threshold,
+            'trade_gate_threshold': result.trade_gate_threshold,
+            'threshold_used': result.threshold,
+            'threshold_used_reason': result.threshold_used_reason,
+            'pattern_confirmation': result.pattern_confirmation,
+            'primary_pattern': result.primary_pattern,
+            'pattern_direction': result.direction,
+            'pattern_weight': self.pattern_weight,
+            'strategy_weight': self.strategy_weight,
+        }

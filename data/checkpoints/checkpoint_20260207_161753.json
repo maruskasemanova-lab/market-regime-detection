@@ -1,0 +1,165 @@
+{
+  "version": 1,
+  "created_at": "2026-02-07T16:17:53.649892",
+  "source": {
+    "run_id": "backtest-1770480956346",
+    "ticker": "MU",
+    "date_from": "2026-02-03",
+    "date_to": "2026-02-03",
+    "total_trades": 3,
+    "win_rate": 0.0
+  },
+  "calibrator": {
+    "lookback": 50,
+    "calibrators": {
+      "Evidence:Evening Star|TRENDING": {
+        "n_bins": 10,
+        "lookback": 50,
+        "outcomes": [
+          [
+            50.0,
+            false
+          ],
+          [
+            50.0,
+            false
+          ]
+        ]
+      },
+      "Evidence:Evening Star|ALL": {
+        "n_bins": 10,
+        "lookback": 50,
+        "outcomes": [
+          [
+            50.0,
+            false
+          ],
+          [
+            50.0,
+            false
+          ]
+        ]
+      },
+      "Evidence:Morning Star|TRENDING": {
+        "n_bins": 10,
+        "lookback": 50,
+        "outcomes": [
+          [
+            50.0,
+            false
+          ]
+        ]
+      },
+      "Evidence:Morning Star|ALL": {
+        "n_bins": 10,
+        "lookback": 50,
+        "outcomes": [
+          [
+            50.0,
+            false
+          ]
+        ]
+      }
+    },
+    "global_calibrator": {
+      "n_bins": 10,
+      "lookback": 150,
+      "outcomes": [
+        [
+          50.0,
+          false
+        ],
+        [
+          50.0,
+          false
+        ],
+        [
+          50.0,
+          false
+        ]
+      ]
+    }
+  },
+  "edge_monitor": {
+    "trackers": {
+      "Evidence:Evening Star|TRENDING": {
+        "window": 30,
+        "trades": [
+          [
+            -0.47796536471073237,
+            false
+          ],
+          [
+            -1.028780840466906,
+            false
+          ]
+        ],
+        "total_trades": 2,
+        "total_wins": 0
+      },
+      "Evidence:Morning Star|TRENDING": {
+        "window": 30,
+        "trades": [
+          [
+            -1.025874912212567,
+            false
+          ]
+        ],
+        "total_trades": 1,
+        "total_wins": 0
+      }
+    },
+    "global_tracker": {
+      "window": 90,
+      "trades": [
+        [
+          -0.47796536471073237,
+          false
+        ],
+        [
+          -1.025874912212567,
+          false
+        ],
+        [
+          -1.028780840466906,
+          false
+        ]
+      ],
+      "total_trades": 3,
+      "total_wins": 0
+    }
+  },
+  "combiner": {
+    "performance": {
+      "strategy|Evidence:Evening Star|TRENDING": {
+        "trades": 2,
+        "wins": 0,
+        "total_pnl_r": -1.5067462051776386,
+        "recent_pnls": [
+          -0.47796536471073237,
+          -1.028780840466906
+        ]
+      },
+      "strategy|Evidence:Morning Star|TRENDING": {
+        "trades": 1,
+        "wins": 0,
+        "total_pnl_r": -1.025874912212567,
+        "recent_pnls": [
+          -1.025874912212567
+        ]
+      }
+    },
+    "regime_performance": {
+      "TRENDING": {
+        "trades": 3,
+        "wins": 0,
+        "total_pnl_r": -2.5326211173902053,
+        "recent_pnls": [
+          -0.47796536471073237,
+          -1.025874912212567,
+          -1.028780840466906
+        ]
+      }
+    }
+  }
+}
