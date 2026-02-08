@@ -269,6 +269,10 @@ class TradingSession:
     
     # Trailing stop config
     trailing_stop_pct: float = 0.8
+    trailing_activation_pct: float = 0.15  # Reduced from 0.30 for faster break-even
+    break_even_buffer_pct: float = 0.03    # Tightened from 0.05
+    trailing_enabled_in_choppy: bool = False  # Disable trailing in CHOPPY regime
+    choppy_time_exit_bars: int = 12         # Shorter time-stop in CHOPPY regime
     
     # Session results
     start_price: Optional[float] = None
@@ -2291,6 +2295,25 @@ class DayTradingManager:
 
                 # Queue signal for next bar open (no same-bar execution).
                 if signal.signal_type in [SignalType.BUY, SignalType.SELL]:
+                    # Cost-aware filter: reject if expected risk is too small vs costs
+                    # This eliminates micro-moves where fees dominate returns
+                    if signal.stop_loss and signal.stop_loss > 0:
+                        risk_pct = abs(signal.stop_loss - signal.price) / signal.price * 100
+                        min_risk_vs_costs = 5.0  # Increased from 3× to 5× costs
+                        cost_pct = 0.02  # Approx total costs (fee + slippage)
+                        if risk_pct < min_risk_vs_costs * cost_pct:
+                            logger.debug(
+                                f"Signal rejected: risk {risk_pct:.3f}% < "
+                                f"{min_risk_vs_costs}× costs ({min_risk_vs_costs * cost_pct:.3f}%)"
+                            )
+                            result['signal_rejected'] = {
+                                'gate': 'cost_aware',
+                                'risk_pct': round(risk_pct, 4),
+                                'min_required': round(min_risk_vs_costs * cost_pct, 4),
+                                'reasoning': f"Risk {risk_pct:.3f}% < {min_risk_vs_costs}× costs",
+                            }
+                            return result
+                    
                     session.pending_signal = signal
                     session.pending_signal_bar_index = current_bar_index
                     result['action'] = 'signal_queued'
@@ -2324,7 +2347,11 @@ class DayTradingManager:
         """Return effective stop level and reason for the current side."""
         candidates: List[tuple] = []
         if pos.stop_loss and pos.stop_loss > 0:
-            candidates.append(("stop_loss", float(pos.stop_loss)))
+            # Differentiate break-even stop from initial stop-loss
+            if pos.break_even_stop_active:
+                candidates.append(("breakeven_stop", float(pos.stop_loss)))
+            else:
+                candidates.append(("stop_loss", float(pos.stop_loss)))
         if pos.trailing_stop_active and pos.trailing_stop_price and pos.trailing_stop_price > 0:
             candidates.append(("trailing_stop", float(pos.trailing_stop_price)))
 
@@ -2336,6 +2363,7 @@ class DayTradingManager:
         else:
             reason, level = min(candidates, key=lambda x: x[1])
         return level, reason
+
 
     def _resolve_exit_for_bar(self, pos: Position, bar: BarData) -> Optional[tuple]:
         """
@@ -2357,18 +2385,58 @@ class DayTradingManager:
         return None
 
     def _update_trailing_from_close(self, session: TradingSession, pos: Position, bar: BarData) -> None:
-        """Update trailing stop from close; this will be effective on the next bar."""
-        if not pos.trailing_stop_active:
+        """Update trailing stop with regime-aware activation logic.
+        
+        Key behaviors:
+        1. Trailing disabled in CHOPPY regime (unless explicitly enabled)
+        2. Trailing only activates after position reaches min profit threshold
+        3. Break-even stop is set before trailing starts
+        4. Standard trailing logic only runs after break-even is active
+        """
+        # 1. Skip trailing in CHOPPY if disabled
+        if session.detected_regime == Regime.CHOPPY and not session.trailing_enabled_in_choppy:
             return
+        
+        # Always update price tracking for MFE calculation
         if pos.side == 'long':
             if bar.close > pos.highest_price:
                 pos.highest_price = bar.close
+            mfe_pct = (pos.highest_price - pos.entry_price) / pos.entry_price * 100
+        else:
+            if bar.close < pos.lowest_price:
+                pos.lowest_price = bar.close
+            mfe_pct = (pos.entry_price - pos.lowest_price) / pos.entry_price * 100
+        
+        # 2. Check if trailing activation threshold met
+        if mfe_pct >= session.trailing_activation_pct:
+            pos.trailing_activation_pnl_met = True
+        
+        # 3. First: Move to break-even once threshold met
+        if pos.trailing_activation_pnl_met and not pos.break_even_stop_active:
+            if pos.side == 'long':
+                new_be_stop = pos.entry_price * (1 + session.break_even_buffer_pct / 100)
+                # Only update if it improves the stop
+                if pos.stop_loss < new_be_stop:
+                    pos.stop_loss = new_be_stop
+                    pos.break_even_stop_active = True
+            else:
+                # SHORT: break-even stop must be ABOVE entry (price going up = loss for short)
+                new_be_stop = pos.entry_price * (1 + session.break_even_buffer_pct / 100)
+                # For SHORT, a LOWER stop is more protective (closer to current price)
+                if pos.stop_loss > new_be_stop or pos.stop_loss == 0:
+                    pos.stop_loss = new_be_stop
+                    pos.break_even_stop_active = True
+        
+        # 4. Only run trailing logic if trailing is active AND break-even is set
+        if not pos.trailing_stop_active or not pos.break_even_stop_active:
+            return
+        
+        # 5. Standard trailing logic (only updates if improves the stop)
+        if pos.side == 'long':
             new_stop = pos.highest_price * (1 - session.trailing_stop_pct / 100)
             if new_stop > pos.trailing_stop_price:
                 pos.trailing_stop_price = new_stop
         else:
-            if bar.close < pos.lowest_price:
-                pos.lowest_price = bar.close
             new_stop = pos.lowest_price * (1 + session.trailing_stop_pct / 100)
             if new_stop < pos.trailing_stop_price or pos.trailing_stop_price == 0:
                 pos.trailing_stop_price = new_stop
@@ -3100,7 +3168,14 @@ class DayTradingManager:
     def _should_time_exit(self, session: TradingSession, pos: Position, current_bar_index: int) -> bool:
         if session.time_exit_bars <= 0:
             return False
-        limit_bars = float(session.time_exit_bars)
+        
+        # Use shorter time limit in CHOPPY regime
+        if session.detected_regime == Regime.CHOPPY:
+            base_limit = float(session.choppy_time_exit_bars)
+        else:
+            base_limit = float(session.time_exit_bars)
+        
+        limit_bars = base_limit
         flow = self._calculate_order_flow_metrics(session.bars, lookback=min(8, len(session.bars)))
         signed_aggression = float(flow.get("signed_aggression", 0.0) or 0.0)
         favorable = (

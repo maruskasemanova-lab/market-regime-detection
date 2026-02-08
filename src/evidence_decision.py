@@ -159,28 +159,32 @@ class EvidenceDecisionEngine:
                     result.primary_pattern = best_pattern.name
                     result.pattern_score = pattern_score
 
-                    cal_conf = self.calibrator.calibrate(
-                        f"pattern:{best_pattern.name}",
-                        pattern_score,
-                        regime_state.primary if regime_state else regime.value,
-                    )
-
-                    evidence_sources.append(EvidenceSource(
-                        source_type='pattern',
-                        source_name=best_pattern.name,
-                        direction=pattern_direction,
-                        strength=pattern_score,
-                        calibrated=cal_conf,
-                        reasoning=f"Pattern {best_pattern.name} strength={pattern_score:.0f}",
-                    ))
-
-                    calibrated_signals.append(CalibratedSignal(
-                        source_type='pattern',
-                        source_name=best_pattern.name,
-                        direction=pattern_direction,
-                        raw_confidence=pattern_score,
-                        calibrated_confidence=cal_conf,
-                    ))
+                    # DISABLED: Candlestick patterns are not evidence-based
+                    # They add noise without proven edge. Keeping pattern_score for
+                    # logging/debugging but not as a decision source.
+                    #
+                    # cal_conf = self.calibrator.calibrate(
+                    #     f"pattern:{best_pattern.name}",
+                    #     pattern_score,
+                    #     regime_state.primary if regime_state else regime.value,
+                    # )
+                    #
+                    # evidence_sources.append(EvidenceSource(
+                    #     source_type='pattern',
+                    #     source_name=best_pattern.name,
+                    #     direction=pattern_direction,
+                    #     strength=pattern_score,
+                    #     calibrated=cal_conf,
+                    #     reasoning=f"Pattern {best_pattern.name} strength={pattern_score:.0f}",
+                    # ))
+                    #
+                    # calibrated_signals.append(CalibratedSignal(
+                    #     source_type='pattern',
+                    #     source_name=best_pattern.name,
+                    #     direction=pattern_direction,
+                    #     raw_confidence=pattern_score,
+                    #     calibrated_confidence=cal_conf,
+                    # ))
 
         # ── Evidence 2: Strategy Signals ──────────────────────────────
         confirming_signals: List[Signal] = []

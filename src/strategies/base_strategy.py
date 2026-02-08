@@ -72,6 +72,9 @@ class Position:
     fill_ratio: float = 1.0
     initial_size: float = 0.0
     partial_exit_done: bool = False
+    # Regime-aware trailing stop state
+    break_even_stop_active: bool = False
+    trailing_activation_pnl_met: bool = False
     partial_take_profit_price: float = 0.0
     signal_bar_index: Optional[int] = None
     entry_bar_index: Optional[int] = None
@@ -150,6 +153,8 @@ class Position:
             'signal_timestamp': self.signal_timestamp,
             'signal_price': self.signal_price,
             'signal_metadata': self.signal_metadata,
+            'break_even_stop_active': self.break_even_stop_active,
+            'trailing_activation_pnl_met': self.trailing_activation_pnl_met,
         }
 
 

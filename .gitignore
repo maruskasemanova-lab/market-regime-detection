@@ -30,3 +30,4 @@ data/
 venv/
 .venv/
 *.egg-info/
+*.log

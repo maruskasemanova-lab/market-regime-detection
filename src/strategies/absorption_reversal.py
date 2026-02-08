@@ -21,7 +21,7 @@ class AbsorptionReversalStrategy(BaseStrategy):
         min_book_pressure: float = 0.05,
         min_price_extension_pct: float = 0.12,
         min_confidence: float = 62.0,
-        atr_stop_multiplier: float = 1.4,
+        atr_stop_multiplier: float = 0.9,  # Reduced from 1.4 for tighter SL
         rr_ratio: float = 1.8,
         trailing_stop_pct: float = 0.7,
     ):

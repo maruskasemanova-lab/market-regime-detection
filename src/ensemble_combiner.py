@@ -124,9 +124,13 @@ class AdaptiveWeightCombiner:
         self,
         min_confirming_sources: int = 2,
         base_threshold: float = 55.0,
+        min_margin_over_threshold: float = 5.0,  # Increased from 3 to 5
+        single_source_min_margin: float = 10.0,  # Increased from 6 to 10
     ):
         self._min_confirming = min_confirming_sources
         self._base_threshold = base_threshold
+        self._min_margin = min_margin_over_threshold
+        self._single_source_margin = single_source_min_margin
 
         # Performance tracking: (source_type, source_name, regime) → SourcePerformance
         self._performance: Dict[Tuple[str, str, str], SourcePerformance] = {}
@@ -223,22 +227,32 @@ class AdaptiveWeightCombiner:
             1 for s in aligned_signals if s.calibrated_confidence > 0.35
         )
 
-        # Execute decision
+        # Margin-based execute decision
+        # Require score to beat threshold by a margin to filter low-edge trades
+        margin = combined_score - threshold
+        
+        # Stricter margin requirement for single-source trades
+        if confirming < 2:
+            required_margin = self._single_source_margin
+        else:
+            required_margin = self._min_margin
+        
         execute = (
-            combined_score >= threshold
-            and confirming >= self._min_confirming
+            margin >= required_margin
+            and confirming >= 1  # At least 1 source required
         )
 
         reasons = []
-        if combined_score < threshold:
-            reasons.append(f"score {combined_score:.1f} < threshold {threshold:.1f}")
-        if confirming < self._min_confirming:
+        if margin < required_margin:
             reasons.append(
-                f"confirming {confirming} < min {self._min_confirming}"
+                f"margin {margin:.1f} < required {required_margin:.1f} "
+                f"(score {combined_score:.1f}, thresh {threshold:.1f})"
             )
+        if confirming < 1:
+            reasons.append(f"no confirming sources")
         if execute:
             reasons.append(
-                f"score {combined_score:.1f} >= threshold {threshold:.1f}, "
+                f"margin {margin:.1f} >= {required_margin:.1f}, "
                 f"{confirming} sources confirm"
             )
 

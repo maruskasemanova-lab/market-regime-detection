@@ -20,7 +20,7 @@ class MomentumFlowStrategy(BaseStrategy):
         min_sweep_intensity: float = 0.08,
         min_book_pressure: float = 0.0,
         min_confidence: float = 54.0,
-        atr_stop_multiplier: float = 1.8,
+        atr_stop_multiplier: float = 1.0,  # Reduced from 1.8 for tighter SL
         rr_ratio: float = 2.2,
         trailing_stop_pct: float = 0.9,
     ):

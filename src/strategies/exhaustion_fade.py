@@ -20,7 +20,7 @@ class ExhaustionFadeStrategy(BaseStrategy):
         max_sweep_intensity: float = 0.8,
         min_book_pressure: float = 0.0,
         min_confidence: float = 63.0,
-        atr_stop_multiplier: float = 1.3,
+        atr_stop_multiplier: float = 0.8,  # Reduced from 1.3 for tighter SL
         rr_ratio: float = 1.7,
         trailing_stop_pct: float = 0.6,
     ):
