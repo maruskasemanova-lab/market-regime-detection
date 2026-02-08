@@ -26,11 +26,11 @@ class PullbackStrategy(BaseStrategy):
         ma_fast_period: int = 50,             # ~10 EMA on 5m chart
         ma_slow_period: int = 100,            # ~20 EMA on 5m chart
         volume_lookback: int = 20,
-        volume_surge_ratio: float = 1.5,      # Increased from 1.2 for stronger signals
-        volume_stop_pct: float = 1.5,         # Wider stop (was 1.0)
-        rr_ratio: float = 2.0,                # Better R:R (was 1.5)
-        min_confidence: float = 65.0,         # Standard confidence
-        trailing_stop_pct: float = 1.2        # Wider trail (was 1.0)
+        volume_surge_ratio: float = 1.3,      # Moderate volume confirmation
+        volume_stop_pct: float = 1.5,         # Wider stop for volatile stocks
+        rr_ratio: float = 2.0,                # Good R:R
+        min_confidence: float = 55.0,         # Lower bar — pullbacks are higher-quality setups
+        trailing_stop_pct: float = 1.2        # Trail for runners
     ):
         super().__init__(
             name="Pullback",
@@ -77,7 +77,11 @@ class PullbackStrategy(BaseStrategy):
         ema_s = ema_s[-1] if isinstance(ema_s, list) else (ema_s or current_price)
         vwap_val = vwap[-1] if isinstance(vwap, list) else (vwap or current_price)
         rsi_val = rsi[-1] if isinstance(rsi, list) else (rsi or 50)
-        adx_val = adx[-1] if isinstance(adx, list) else (adx or 0)
+        adx_val = adx[-1] if isinstance(adx, list) else adx
+        
+        # ADX is required for pullback strategy - skip if unavailable (warmup)
+        if adx_val is None:
+            return None
         
         # Get OHLC
         opens = ohlcv.get('open', [])

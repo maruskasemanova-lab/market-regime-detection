@@ -60,6 +60,23 @@ class RegimeState:
         """Whether the regime classification is confident (> 0.55)."""
         return self.confidence > 0.55
 
+    @property
+    def is_transition(self) -> bool:
+        """Whether the market is in a transition/noise state.
+        
+        Returns True when:
+          - micro_regime is TRANSITION
+          - macro TRENDING but micro is CHOPPY/MIXED (divergence)
+        
+        Note: We don't check low confidence here because defaults are low.
+        Low confidence is already penalized via regime_confidence in threshold.
+        """
+        if self.micro_regime == "TRANSITION":
+            return True
+        if self.primary == "TRENDING" and self.micro_regime in {"CHOPPY", "MIXED"}:
+            return True
+        return False
+
     def probability(self, regime: str) -> float:
         return self.probabilities.get(regime, 0.0)
 
@@ -76,6 +93,10 @@ class RuleBasedClassifier:
         trend_eff = fv.trend_efficiency
         atr_z = fv.atr_z
         roc_5 = abs(fv.roc_5)
+
+        # Handle None ADX during warmup - use neutral value
+        if adx is None:
+            adx = 20.0  # Neutral: neither strongly trending nor choppy
 
         # Trending score: high ADX + high trend efficiency + directional momentum
         trending_score = 0.0
@@ -156,11 +177,14 @@ class L2FlowClassifier:
 
     def classify_micro(self, fv: FeatureVector) -> str:
         """Detailed micro-regime from L2 flow."""
+        # Handle None ADX during warmup
+        adx = fv.adx_14 if fv.adx_14 is not None else 20.0
+
         if not fv.l2_has_coverage:
             # Fallback to price-only micro
-            if fv.adx_14 > 25 and fv.trend_efficiency > 0.5:
+            if adx > 25 and fv.trend_efficiency > 0.5:
                 return "TRENDING_UP" if fv.roc_5 >= 0 else "TRENDING_DOWN"
-            if fv.adx_14 < 20:
+            if adx < 20:
                 return "CHOPPY"
             return "MIXED"
 
@@ -181,11 +205,11 @@ class L2FlowClassifier:
             return "ABSORPTION"
 
         # Trending: directional flow
-        if abs(aggression) >= 0.06 and consistency >= 0.45 and fv.adx_14 >= 20:
+        if abs(aggression) >= 0.06 and consistency >= 0.45 and adx >= 20:
             return "TRENDING_UP" if aggression > 0 else "TRENDING_DOWN"
 
         # Choppy
-        if fv.adx_14 < 18 and fv.trend_efficiency < 0.35:
+        if adx < 18 and fv.trend_efficiency < 0.35:
             return "CHOPPY"
 
         return "MIXED"

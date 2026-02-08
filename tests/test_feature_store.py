@@ -148,3 +148,23 @@ class TestFeatureStore:
             fv = store.update(_make_bar(100.0 + i, volume=1000))
         assert fv.obv > 0
         assert fv.obv_slope > 0
+
+    def test_adx_returns_none_during_warmup(self):
+        """ADX should return None during warmup period (< ~28 bars)."""
+        store = FeatureStore()
+        # ADX needs 2*period (14) bars for proper smoothing
+        for i in range(15):
+            fv = store.update(_make_bar(100.0 + i * 0.1))
+        assert fv.adx_14 is None, f"Expected None during warmup, got {fv.adx_14}"
+
+    def test_adx_returns_value_after_warmup(self):
+        """ADX should return a valid float after sufficient bars."""
+        store = FeatureStore()
+        # Feed 40 bars - enough for ADX to stabilize
+        for i in range(40):
+            # Create trending price action
+            fv = store.update(_make_bar(100.0 + i * 0.5))
+        assert fv.adx_14 is not None, "ADX should be available after warmup"
+        assert isinstance(fv.adx_14, float), f"Expected float, got {type(fv.adx_14)}"
+        assert fv.adx_14 > 0, f"Expected positive ADX for trending prices, got {fv.adx_14}"
+

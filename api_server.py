@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+import math
 import uvicorn
 from datetime import datetime
 
@@ -286,6 +287,17 @@ async def process_bar(bar: BarInput):
         bar_data=bar_data
     )
 
+    # Sanitize NaN/Inf values that crash JSON serialization
+    def _sanitize(obj):
+        if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+            return None
+        if isinstance(obj, dict):
+            return {k: _sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_sanitize(v) for v in obj]
+        return obj
+    result = _sanitize(result)
+
     # Feed cross-asset reference bar to orchestrator if provided
     if bar.ref_ticker and bar.ref_close:
         orch = day_trading_manager.orchestrator
@@ -488,6 +500,7 @@ async def configure_session(
     l2_min_participation_ratio: float = 0.0,
     l2_min_directional_consistency: float = 0.0,
     l2_min_signed_aggression: float = 0.0,
+    cold_start_each_day: bool = False,
 ):
     """Configure session parameters before processing."""
     session = day_trading_manager.get_or_create_session(
@@ -538,6 +551,7 @@ async def configure_session(
         l2_min_participation_ratio=l2_min_participation_ratio,
         l2_min_directional_consistency=l2_min_directional_consistency,
         l2_min_signed_aggression=l2_min_signed_aggression,
+        cold_start_each_day=cold_start_each_day,
     )
     
     return {

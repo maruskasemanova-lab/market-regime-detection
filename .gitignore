@@ -2,6 +2,31 @@ node_modules/
 __pycache__/
 *.pyc
 .DS_Store
+.kilocode/
+.claude/*
+!.claude/commands/
+!.claude/commands/**
+.claude/settings.local.json
 
 # Logs
 *.log
+
+# Runtime checkpoints (warm-start state, not source code)
+checkpoint_*.json
+*.checkpoint.json
+checkpoints/
+**/checkpoints/
+data/checkpoints/
+**/data/checkpoints/
+
+# Generated data outputs
+data/
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+
+# Python environment
+venv/
+.venv/
+*.egg-info/

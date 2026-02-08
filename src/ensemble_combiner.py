@@ -141,6 +141,8 @@ class AdaptiveWeightCombiner:
         regime_confidence: float = 0.5,
         time_of_day_boost: float = 0.0,
         transition_velocity: float = 0.0,
+        trend_efficiency: Optional[float] = None,
+        is_transition: bool = False,
     ) -> EnsembleScore:
         """
         Combine calibrated signals into ensemble decision.
@@ -151,6 +153,8 @@ class AdaptiveWeightCombiner:
             regime_confidence: Probability of current regime (0-1)
             time_of_day_boost: Additional threshold penalty for quiet hours
             transition_velocity: Regime instability (0-1)
+            trend_efficiency: Current trend efficiency (0-1), None if unavailable
+            is_transition: True if in transition/noise state (macro/micro divergence)
         """
         if not signals:
             return EnsembleScore(reasoning="No signals")
@@ -209,11 +213,14 @@ class AdaptiveWeightCombiner:
         # Dynamic threshold
         threshold = self._compute_dynamic_threshold(
             regime, regime_confidence, time_of_day_boost, transition_velocity,
+            trend_efficiency, is_transition,
         )
 
-        # Confirming sources check
+        # Confirming sources check (lowered from 0.45 to 0.35 —
+        # calibrated confidences typically range 0.35-0.65, so 0.45 was
+        # too strict for most individual sources to qualify as "confirming")
         confirming = sum(
-            1 for s in aligned_signals if s.calibrated_confidence > 0.45
+            1 for s in aligned_signals if s.calibrated_confidence > 0.35
         )
 
         # Execute decision
@@ -358,6 +365,8 @@ class AdaptiveWeightCombiner:
         regime_confidence: float,
         time_of_day_boost: float,
         transition_velocity: float,
+        trend_efficiency: Optional[float] = None,
+        is_transition: bool = False,
     ) -> float:
         """
         Dynamic threshold based on context.
@@ -367,29 +376,40 @@ class AdaptiveWeightCombiner:
           - Time of day (midday → higher threshold)
           - Transition velocity (unstable regime → higher threshold)
           - Recent regime performance (losing → higher threshold)
+          - Transition/noise state (macro/micro divergence → higher threshold)
+          - Low trend efficiency in TRENDING (TE < 0.15 → higher threshold)
         """
         threshold = self._base_threshold
 
-        # Regime uncertainty penalty: +0 to +10
-        # Low confidence (0.33) → +10, High confidence (1.0) → +0
-        uncertainty_penalty = max(0.0, (1.0 - regime_confidence) * 15.0)
+        # Regime uncertainty penalty: +0 to +5 (reduced from 15x to 8x)
+        # Previous 15x multiplier pushed threshold too high with typical
+        # confidence values of 0.4-0.6, making trades nearly impossible.
+        uncertainty_penalty = max(0.0, (1.0 - regime_confidence) * 8.0)
         threshold += uncertainty_penalty
 
         # Time of day
         threshold += time_of_day_boost
 
-        # Transition instability: +0 to +8
-        threshold += transition_velocity * 8.0
+        # Transition instability: +0 to +4 (reduced from 8x to 4x)
+        threshold += transition_velocity * 4.0
 
-        # Recent regime performance penalty
+        # Transition/noise state (macro/micro divergence): +4 (reduced from +8)
+        if is_transition:
+            threshold += 4.0
+
+        # Low trend efficiency in TRENDING regime: +3 (reduced from +5)
+        if regime == "TRENDING" and trend_efficiency is not None and trend_efficiency < 0.15:
+            threshold += 3.0
+
+        # Recent regime performance penalty (reduced)
         rp = self._regime_performance.get(regime)
         if rp and rp.trades >= 10:
             if rp.win_rate < 0.40:
-                threshold += 8.0  # Losing regime → raise bar
+                threshold += 5.0  # Losing regime → raise bar
             elif rp.win_rate < 0.45:
-                threshold += 4.0
+                threshold += 3.0
 
-        return min(threshold, 90.0)  # Hard cap
+        return min(threshold, 75.0)  # Hard cap (reduced from 90)
 
     def get_stats(self) -> Dict[str, Any]:
         """Get combiner statistics for observability."""

@@ -286,8 +286,8 @@ class TradingSession:
     partial_take_profit_fraction: float = 0.5
     time_exit_bars: int = 40
     adverse_flow_exit_enabled: bool = True
-    adverse_flow_threshold: float = 0.12
-    adverse_flow_min_hold_bars: int = 3
+    adverse_flow_threshold: float = 0.20
+    adverse_flow_min_hold_bars: int = 6
     l2_confirm_enabled: bool = False
     l2_min_delta: float = 0.0
     l2_min_imbalance: float = 0.0
@@ -369,8 +369,8 @@ class DayTradingManager:
         partial_take_profit_rr: float = 1.0,
         partial_take_profit_fraction: float = 0.5,
         adverse_flow_exit_enabled: bool = True,
-        adverse_flow_exit_threshold: float = 0.12,
-        adverse_flow_min_hold_bars: int = 3,
+        adverse_flow_exit_threshold: float = 0.20,
+        adverse_flow_min_hold_bars: int = 6,
     ):
         self.sessions: Dict[str, TradingSession] = {}  # session_key -> TradingSession
         self.regime_detection_minutes = regime_detection_minutes
@@ -778,7 +778,8 @@ class DayTradingManager:
         run_id: str, 
         ticker: str, 
         date: str,
-        regime_detection_minutes: int = None
+        regime_detection_minutes: int = None,
+        cold_start_each_day: bool = False,
     ) -> TradingSession:
         """Get existing session or create new one."""
         key = self._get_session_key(run_id, ticker, date)
@@ -842,7 +843,10 @@ class DayTradingManager:
             # Attach orchestrator and reset session state for new day
             if self.orchestrator is not None:
                 self.sessions[key].orchestrator = self.orchestrator
-                self.orchestrator.new_session()
+                if cold_start_each_day:
+                    self.orchestrator.full_reset()
+                else:
+                    self.orchestrator.new_session()
 
             # Optional config-driven day filter.
             if not self._is_day_allowed(date, ticker):
@@ -876,6 +880,7 @@ class DayTradingManager:
         l2_min_participation_ratio: Optional[float] = None,
         l2_min_directional_consistency: Optional[float] = None,
         l2_min_signed_aggression: Optional[float] = None,
+        cold_start_each_day: Optional[bool] = None,
     ) -> None:
         """Set default parameters for all sessions in a run."""
         key = (run_id, ticker)
@@ -924,6 +929,8 @@ class DayTradingManager:
             defaults["l2_min_directional_consistency"] = float(l2_min_directional_consistency)
         if l2_min_signed_aggression is not None:
             defaults["l2_min_signed_aggression"] = float(l2_min_signed_aggression)
+        if cold_start_each_day is not None:
+            defaults["cold_start_each_day"] = bool(cold_start_each_day)
         self.run_defaults[key] = defaults
     
     def get_session(self, run_id: str, ticker: str, date: str) -> Optional[TradingSession]:
@@ -957,7 +964,8 @@ class DayTradingManager:
             run_id,
             ticker,
             date,
-            regime_detection_minutes=defaults.get("regime_detection_minutes")
+            regime_detection_minutes=defaults.get("regime_detection_minutes"),
+            cold_start_each_day=bool(defaults.get("cold_start_each_day", False)),
         )
         if "account_size_usd" in defaults:
             session.account_size_usd = defaults["account_size_usd"]
@@ -1258,6 +1266,7 @@ class DayTradingManager:
             return Regime.TRENDING
         if micro_regime in {"CHOPPY", "ABSORPTION"}:
             return Regime.CHOPPY
+        # TRANSITION maps to MIXED at macro but retains micro detail
         return Regime.MIXED
 
     @staticmethod
@@ -1268,7 +1277,7 @@ class DayTradingManager:
     def _classify_micro_regime(
         self,
         trend_efficiency: float,
-        adx: float,
+        adx: Optional[float],
         volatility: float,
         price_bias: float,
         flow: Dict[str, float],
@@ -1284,8 +1293,11 @@ class DayTradingManager:
         price_change_pct = float(flow.get("price_change_pct", 0.0))
         flow_has_coverage = bool(flow.get("has_l2_coverage", False))
 
+        # Handle None ADX during warmup - use neutral value that won't bias regime
+        adx_val = adx if adx is not None else 20.0
+
         if flow_has_coverage:
-            trend_eff_threshold = 0.45 if adx > 35.0 else 0.58
+            trend_eff_threshold = 0.45 if adx_val > 35.0 else 0.58
 
             # Large one-way sessions should not be blocked by efficiency checks.
             if abs(price_change_pct) > 2.0:
@@ -1305,19 +1317,30 @@ class DayTradingManager:
             ):
                 return "ABSORPTION"
 
-            if trend_efficiency >= trend_eff_threshold and adx >= 25.0 and signed_aggr >= 0.08 and price_bias > 0:
+            if trend_efficiency >= trend_eff_threshold and adx_val >= 25.0 and signed_aggr >= 0.08 and price_bias > 0:
                 return "TRENDING_UP"
-            if trend_efficiency >= trend_eff_threshold and adx >= 25.0 and signed_aggr <= -0.08 and price_bias < 0:
+            if trend_efficiency >= trend_eff_threshold and adx_val >= 25.0 and signed_aggr <= -0.08 and price_bias < 0:
                 return "TRENDING_DOWN"
 
-            if adx < 20.0 and trend_efficiency < 0.40:
+            if adx_val < 20.0 and trend_efficiency < 0.40:
                 return "CHOPPY"
+
+            # TRANSITION: trend indicators suggest direction but efficiency is very low
+            # This indicates noisy/unreliable trend conditions
+            if trend_efficiency < 0.15 and adx_val >= 15.0:
+                return "TRANSITION"
+
             return "MIXED"
 
         # Fallback without L2 flow coverage.
-        if trend_efficiency >= 0.62 or adx > 30.0:
+        if trend_efficiency >= 0.62 or adx_val > 30.0:
             return "TRENDING_UP" if price_bias >= 0 else "TRENDING_DOWN"
-        if adx < 20.0:
+
+        # TRANSITION: ADX suggests trend but efficiency is very low (no L2 coverage)
+        if trend_efficiency < 0.15 and adx_val >= 20.0:
+            return "TRANSITION"
+
+        if adx_val < 20.0:
             return "CHOPPY"
         return "MIXED"
 
@@ -1543,9 +1566,19 @@ class DayTradingManager:
         candidates.extend(self.default_preference.get(regime, []))
 
         # If L2 coverage is present on current bars, bias toward flow strategies.
+        # Otherwise, add OHLCV-based strategies as fallbacks.
         flow_metrics = self._calculate_order_flow_metrics(session.bars, lookback=min(20, len(session.bars)))
         if flow_metrics.get("has_l2_coverage", False):
             candidates = ['momentum_flow', 'absorption_reversal', 'exhaustion_fade'] + candidates
+        else:
+            # No L2 data available — add OHLCV strategies so the evidence engine
+            # has strategy signals to work with.
+            ohlcv_fallbacks = {
+                Regime.TRENDING: ['momentum', 'pullback'],
+                Regime.CHOPPY: ['mean_reversion'],
+                Regime.MIXED: ['pullback', 'mean_reversion'],
+            }
+            candidates.extend(ohlcv_fallbacks.get(regime, ['pullback', 'mean_reversion']))
 
         filtered: List[str] = []
         seen = set()
@@ -1601,10 +1634,10 @@ class DayTradingManager:
         
         return round(variance ** 0.5, 3)
 
-    def _calc_adx(self, bars: List[BarData], period: int = 14) -> float:
-        """Calculate ADX from bar data."""
+    def _calc_adx(self, bars: List[BarData], period: int = 14) -> Optional[float]:
+        """Calculate ADX from bar data. Returns None during warmup."""
         if len(bars) < period * 2:
-            return 0.0
+            return None
             
         highs = [b.high for b in bars]
         lows = [b.low for b in bars]
@@ -1638,7 +1671,7 @@ class DayTradingManager:
         
         # Need enough data for Wilder's smoothing
         if len(tr_list) < period:
-            return 0.0
+            return None
             
         # Initial smoothed averages (using simple average for first period)
         tr_smooth = sum(tr_list[:period])
@@ -1673,7 +1706,7 @@ class DayTradingManager:
                 adx = (prev_adx * (period - 1) + dx) / period
                 adx_values.append(adx)
                 
-        return round(adx_values[-1], 2) if adx_values else 0.0
+        return round(adx_values[-1], 2) if adx_values else None
     
     def _calc_adx_series(self, bars: List[BarData], period: int = 14) -> List[float]:
         """Calculate ADX series incrementally (point-in-time, no look-ahead bias).
@@ -1682,14 +1715,14 @@ class DayTradingManager:
         only uses data up to that point in time.
         """
         if len(bars) < 2:
-            return [0.0] * len(bars)
+            return [None] * len(bars)
             
         highs = [b.high for b in bars]
         lows = [b.low for b in bars]
         closes = [b.close for b in bars]
         
-        # Pre-fill with zeros for bars that don't have enough data
-        adx_series = [0.0] * len(bars)
+        # Pre-fill with None for bars that don't have enough data
+        adx_series: List[Optional[float]] = [None] * len(bars)
         
         tr_list = []
         dm_plus_list = []
@@ -1772,7 +1805,7 @@ class DayTradingManager:
                 
                 # Use previous ADX for smoothing
                 prev_adx = adx_series[i - 1]
-                if prev_adx > 0:
+                if prev_adx is not None and prev_adx > 0:
                     adx = (prev_adx * (period - 1) + dx) / period
                 else:
                     adx = dx
@@ -2170,6 +2203,8 @@ class DayTradingManager:
                     ticker=session.ticker,
                     generate_signal_fn=gen_signal_fn,
                     is_long_only=is_long_only,
+                    micro_regime=micro_regime,
+                    trend_efficiency=indicators.get('trend_efficiency'),
                 )
 
                 if tod_boost > 0:
@@ -2792,7 +2827,7 @@ class DayTradingManager:
         
         # Calculate ADX series incrementally (point-in-time, no look-ahead)
         adx_series = self._calc_adx_series(bars, 14)
-        indicators['adx'] = adx_series if adx_series else [0.0] * len(closes)
+        indicators['adx'] = adx_series if adx_series else [None] * len(closes)
 
         # Flow metrics are computed from current/past bars only.
         indicators['order_flow'] = self._calculate_order_flow_metrics(bars, lookback=min(24, len(bars)))

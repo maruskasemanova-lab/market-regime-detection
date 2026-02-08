@@ -76,7 +76,7 @@ class MeanReversionStrategy(BaseStrategy):
         # Get latest values
         vwap_val = vwap[-1] if isinstance(vwap, list) else vwap
         rsi_val = rsi[-1] if isinstance(rsi, list) else (rsi or 50)
-        adx_val = adx[-1] if isinstance(adx, list) else (adx or 0)
+        adx_val = adx[-1] if isinstance(adx, list) else adx
         
         # Determine threshold based on regime
         threshold = self.entry_deviation_pct  # Default (0.3 for Choppy)
@@ -104,8 +104,8 @@ class MeanReversionStrategy(BaseStrategy):
         reasoning_parts = []
         
         # Filter: Ensure market is not strongly trending against us
-        # Lowered from 30 to 25 for more trade opportunities
-        if regime != Regime.TRENDING and adx_val > 25:
+        # Only apply filter when ADX is available (not during warmup)
+        if adx_val is not None and regime != Regime.TRENDING and adx_val > 25:
             return None
         
         # LONG SIGNAL: Price below VWAP (oversold)

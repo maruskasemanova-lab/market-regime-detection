@@ -47,9 +47,10 @@ class OrchestratorConfig:
     # Calibration
     calibration_lookback_trades: int = 50
 
-    # Ensemble Combiner
-    min_confirming_sources: int = 2
-    base_threshold: float = 55.0
+    # Ensemble Combiner — lowered defaults for environments where only
+    # 3-4 evidence sources are available (no L2 or cross-asset data).
+    min_confirming_sources: int = 1
+    base_threshold: float = 42.0
 
     # Position Sizing
     base_risk_pct: float = 1.0

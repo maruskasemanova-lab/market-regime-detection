@@ -24,14 +24,14 @@ class MomentumStrategy(BaseStrategy):
     def __init__(
         self,
         consolidation_bars: int = 10,         # 10 minute consolidation (standard flag)
-        volume_threshold: float = 1.8,        # Increased from 1.5 - stricter volume confirmation
+        volume_threshold: float = 1.5,        # Moderate volume confirmation
         volume_lookback: int = 20,
-        consolidation_range_pct: float = 0.6, # % of price to qualify as tight range
-        breakout_pct: float = 0.2,            # Increased buffer for breakout confirmation
-        volume_stop_pct: float = 1.2,         # Wider stop (was 0.8)
+        consolidation_range_pct: float = 1.5, # % of price — higher for volatile stocks like MU
+        breakout_pct: float = 0.15,           # Breakout buffer
+        volume_stop_pct: float = 1.5,         # Wider stop for volatile stocks
         rr_ratio: float = 2.5,                # Good R:R
-        min_confidence: float = 70.0,         # High bar
-        trailing_stop_pct: float = 1.5        # Widen trail to catch runners
+        min_confidence: float = 60.0,         # Moderate bar
+        trailing_stop_pct: float = 1.5        # Trail to catch runners
     ):
         super().__init__(
             name="Momentum",
@@ -78,7 +78,11 @@ class MomentumStrategy(BaseStrategy):
         rsi_val = rsi[-1] if isinstance(rsi, list) else (rsi or 50)
         vwap_val = vwap[-1] if isinstance(vwap, list) else (vwap or current_price)
         ema_val = ema[-1] if isinstance(ema, list) else (ema or current_price)
-        adx_val = adx[-1] if isinstance(adx, list) else (adx or 0)
+        adx_val = adx[-1] if isinstance(adx, list) else adx
+        
+        # ADX is required for momentum strategy - skip if unavailable (warmup)
+        if adx_val is None:
+            return None
         
         # Get OHLC
         opens = ohlcv.get('open', [])

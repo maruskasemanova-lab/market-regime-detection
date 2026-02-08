@@ -310,6 +310,8 @@ class EvidenceDecisionEngine:
 
         regime_conf = regime_state.confidence if regime_state else 0.5
         transition_vel = regime_state.transition_velocity if regime_state else 0.0
+        is_trans = regime_state.is_transition if regime_state else False
+        te = feature_vector.trend_efficiency if feature_vector else None
 
         ensemble = self.combiner.combine(
             signals=calibrated_signals,
@@ -317,6 +319,8 @@ class EvidenceDecisionEngine:
             regime_confidence=regime_conf,
             time_of_day_boost=time_of_day_boost,
             transition_velocity=transition_vel,
+            trend_efficiency=te,
+            is_transition=is_trans,
         )
 
         # ── Map to DecisionResult ─────────────────────────────────────
@@ -325,10 +329,12 @@ class EvidenceDecisionEngine:
         result.combined_norm_0_100 = ensemble.combined_score
         result.combined_raw = ensemble.combined_score  # Simplified for compatibility
         result.threshold = ensemble.threshold_used
+        te_str = f"{te:.2f}" if te is not None else "N/A"
         result.threshold_used_reason = (
             f"dynamic(regime_conf={regime_conf:.2f}, "
             f"tod_boost={time_of_day_boost}, "
-            f"transition_vel={transition_vel:.2f})"
+            f"transition_vel={transition_vel:.2f}, "
+            f"is_trans={is_trans}, te={te_str})"
         )
 
         # Pattern confirmation flag (for legacy compatibility)
@@ -424,47 +430,48 @@ class EvidenceDecisionEngine:
         """Extract directional evidence from normalized features."""
         evidence = []
 
-        # RSI extreme: z-score > 1.5 or < -1.5
-        if fv.rsi_z < -1.5:
+        # RSI extreme: z-score > 1.0 (lowered from 1.5 for OHLCV-only environments
+        # where fewer evidence sources are available)
+        if fv.rsi_z < -1.0:
             evidence.append(EvidenceSource(
                 source_type='feature', source_name='rsi_oversold',
-                direction='bullish', strength=min(80, 50 + abs(fv.rsi_z) * 10),
-                calibrated=min(0.7, 0.4 + abs(fv.rsi_z) * 0.1),
+                direction='bullish', strength=min(80, 50 + abs(fv.rsi_z) * 12),
+                calibrated=min(0.7, 0.40 + abs(fv.rsi_z) * 0.10),
                 reasoning=f"RSI z-score={fv.rsi_z:.1f} (oversold)",
             ))
-        elif fv.rsi_z > 1.5:
+        elif fv.rsi_z > 1.0:
             evidence.append(EvidenceSource(
                 source_type='feature', source_name='rsi_overbought',
-                direction='bearish', strength=min(80, 50 + abs(fv.rsi_z) * 10),
-                calibrated=min(0.7, 0.4 + abs(fv.rsi_z) * 0.1),
+                direction='bearish', strength=min(80, 50 + abs(fv.rsi_z) * 12),
+                calibrated=min(0.7, 0.40 + abs(fv.rsi_z) * 0.10),
                 reasoning=f"RSI z-score={fv.rsi_z:.1f} (overbought)",
             ))
 
-        # Strong momentum: z-score > 1.2
-        if fv.momentum_z > 1.2:
+        # Strong momentum: z-score > 0.8 (lowered from 1.2)
+        if fv.momentum_z > 0.8:
             evidence.append(EvidenceSource(
                 source_type='feature', source_name='momentum_strong',
-                direction='bullish', strength=min(75, 50 + fv.momentum_z * 8),
-                calibrated=min(0.65, 0.35 + fv.momentum_z * 0.08),
+                direction='bullish', strength=min(75, 50 + fv.momentum_z * 10),
+                calibrated=min(0.65, 0.38 + fv.momentum_z * 0.09),
                 reasoning=f"Momentum z={fv.momentum_z:.1f}",
             ))
-        elif fv.momentum_z < -1.2:
+        elif fv.momentum_z < -0.8:
             evidence.append(EvidenceSource(
                 source_type='feature', source_name='momentum_strong',
-                direction='bearish', strength=min(75, 50 + abs(fv.momentum_z) * 8),
-                calibrated=min(0.65, 0.35 + abs(fv.momentum_z) * 0.08),
+                direction='bearish', strength=min(75, 50 + abs(fv.momentum_z) * 10),
+                calibrated=min(0.65, 0.38 + abs(fv.momentum_z) * 0.09),
                 reasoning=f"Momentum z={fv.momentum_z:.1f}",
             ))
 
-        # VWAP deviation: strong deviation for mean reversion
-        if fv.vwap_dist_z < -2.0:
+        # VWAP deviation (lowered from 2.0 to 1.5)
+        if fv.vwap_dist_z < -1.5:
             evidence.append(EvidenceSource(
                 source_type='feature', source_name='vwap_below',
                 direction='bullish', strength=min(70, 45 + abs(fv.vwap_dist_z) * 8),
                 calibrated=min(0.6, 0.35 + abs(fv.vwap_dist_z) * 0.06),
                 reasoning=f"VWAP distance z={fv.vwap_dist_z:.1f}",
             ))
-        elif fv.vwap_dist_z > 2.0:
+        elif fv.vwap_dist_z > 1.5:
             evidence.append(EvidenceSource(
                 source_type='feature', source_name='vwap_above',
                 direction='bearish', strength=min(70, 45 + abs(fv.vwap_dist_z) * 8),
@@ -472,8 +479,8 @@ class EvidenceDecisionEngine:
                 reasoning=f"VWAP distance z={fv.vwap_dist_z:.1f}",
             ))
 
-        # Volume spike with direction
-        if fv.volume_z > 2.0 and abs(fv.roc_5) > 0.2:
+        # Volume spike with direction (lowered from z>2.0/roc>0.2 to z>1.5/roc>0.15)
+        if fv.volume_z > 1.5 and abs(fv.roc_5) > 0.15:
             vol_dir = 'bullish' if fv.roc_5 > 0 else 'bearish'
             evidence.append(EvidenceSource(
                 source_type='feature', source_name='volume_spike',

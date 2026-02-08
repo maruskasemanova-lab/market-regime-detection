@@ -37,7 +37,7 @@ class FeatureVector:
     ema_20: float = 0.0
     rsi_14: float = 50.0
     atr_14: float = 0.0
-    adx_14: float = 0.0
+    adx_14: Optional[float] = None
     bollinger_width: float = 0.0
     roc_5: float = 0.0
     roc_10: float = 0.0
@@ -307,10 +307,10 @@ class FeatureStore:
         range_atr = (bar_range / atr_14) if atr_14 > 0 else 0.0
         trend_eff = (abs(c - o) / bar_range) if bar_range > 0 else 0.0
 
-        # --- Update rolling stats & compute z-scores ---
         self._stats_rsi.update(rsi_14)
         self._stats_atr.update(atr_14)
-        self._stats_adx.update(adx_14)
+        if adx_14 is not None:
+            self._stats_adx.update(adx_14)
         self._stats_volume.update(v)
         self._stats_vwap_dist.update(vwap_dist_pct)
         self._stats_roc5.update(roc_5)
@@ -322,7 +322,7 @@ class FeatureStore:
 
         rsi_z = self._stats_rsi.z_score(rsi_14)
         atr_z = self._stats_atr.z_score(atr_14)
-        adx_z = self._stats_adx.z_score(adx_14)
+        adx_z = self._stats_adx.z_score(adx_14) if adx_14 is not None else 0.0
         volume_z = self._stats_volume.z_score(v)
         vwap_dist_z = self._stats_vwap_dist.z_score(vwap_dist_pct)
         roc_5_z = self._stats_roc5.z_score(roc_5)
@@ -462,13 +462,13 @@ class FeatureStore:
         self._atr_values.append(tr)
         return sum(self._atr_values) / len(self._atr_values)
 
-    def _compute_adx(self, high: float, low: float, close: float) -> float:
-        """ADX(14) with Wilder's smoothing, streaming."""
+    def _compute_adx(self, high: float, low: float, close: float) -> Optional[float]:
+        """ADX(14) with Wilder's smoothing, streaming. Returns None during warmup."""
         self._adx_bar_count += 1
         period = self._adx_period
 
         if self._adx_bar_count < 2:
-            return 0.0
+            return None
 
         prev_h = self._highs[-2] if len(self._highs) >= 2 else high
         prev_l = self._lows[-2] if len(self._lows) >= 2 else low
@@ -492,7 +492,7 @@ class FeatureStore:
             if self._adx_bar_count == period:
                 # First smoothed values
                 pass
-            return 0.0
+            return None
         elif self._adx_bar_count == period + 1:
             # First proper smoothing
             self._adx_tr_sum = self._adx_tr_sum - (self._adx_tr_sum / period) + tr
@@ -505,13 +505,13 @@ class FeatureStore:
             self._adx_minus_dm_sum = self._adx_minus_dm_sum - (self._adx_minus_dm_sum / period) + minus_dm
 
         if self._adx_tr_sum < 1e-10:
-            return 0.0
+            return None
 
         plus_di = 100.0 * self._adx_plus_dm_sum / self._adx_tr_sum
         minus_di = 100.0 * self._adx_minus_dm_sum / self._adx_tr_sum
         di_sum = plus_di + minus_di
         if di_sum < 1e-10:
-            return 0.0
+            return None
 
         dx = 100.0 * abs(plus_di - minus_di) / di_sum
         self._adx_dx_values.append(dx)
@@ -520,11 +520,12 @@ class FeatureStore:
             if len(self._adx_dx_values) >= period:
                 self._adx_smoothed = sum(self._adx_dx_values) / len(self._adx_dx_values)
             else:
-                return sum(self._adx_dx_values) / len(self._adx_dx_values) if self._adx_dx_values else 0.0
+                # Still in warmup - not enough DX values for proper smoothing
+                return None
         else:
             self._adx_smoothed = (self._adx_smoothed * (period - 1) + dx) / period
 
-        return self._adx_smoothed or 0.0
+        return self._adx_smoothed
 
     def _compute_bollinger_width(self, period: int = 20) -> float:
         """Bollinger Band width (upper - lower) / middle."""

@@ -116,19 +116,44 @@ class MultiLayerDecision:
         ticker: str = "",
         generate_signal_fn=None,
         is_long_only: bool = False,
+        micro_regime: Optional[str] = None,
+        trend_efficiency: Optional[float] = None,
     ) -> DecisionResult:
         """
         Run multi-layer evaluation.
 
+        Args:
+            micro_regime: If provided, used to detect TRANSITION conditions.
+            trend_efficiency: If provided, used to detect low-efficiency TRENDING.
+
         Returns:
             DecisionResult with execution decision and full reasoning chain.
         """
+        # ── Regime-based threshold adjustment ────────────────────────
+        # Boost threshold for uncertain/transitional conditions
+        threshold_boost = 0.0
+        boost_reason = ""
+        
+        if micro_regime == "TRANSITION":
+            threshold_boost += 10.0
+            boost_reason = "TRANSITION micro-regime"
+        elif regime.value == "TRENDING" and micro_regime in {"CHOPPY", "MIXED"}:
+            threshold_boost += 8.0
+            boost_reason = "macro/micro divergence"
+        
+        # Low trend efficiency in TRENDING regime = extra caution
+        if regime.value == "TRENDING" and trend_efficiency is not None and trend_efficiency < 0.15:
+            threshold_boost += 5.0
+            boost_reason = (boost_reason + " + low TE" if boost_reason else "low trend efficiency")
+        
+        effective_base_threshold = self.threshold + threshold_boost
+        
         result = DecisionResult(
-            threshold=self.threshold,
-            pattern_threshold=self.threshold,
+            threshold=effective_base_threshold,
+            pattern_threshold=effective_base_threshold,
             trade_gate_threshold=(
-                self.strategy_only_threshold if self.strategy_only_threshold > 0
-                else self.threshold
+                (self.strategy_only_threshold + threshold_boost) if self.strategy_only_threshold > 0
+                else effective_base_threshold
             ),
         )
 
@@ -283,14 +308,18 @@ class MultiLayerDecision:
         )
 
         if result.pattern_confirmation:
-            effective_threshold = self.threshold
+            effective_threshold = effective_base_threshold
             result.threshold_used_reason = "pattern_confirmation"
         elif self.strategy_only_threshold > 0:
-            effective_threshold = self.strategy_only_threshold
+            effective_threshold = self.strategy_only_threshold + threshold_boost
             result.threshold_used_reason = "no_pattern_confirmation"
         else:
-            effective_threshold = self.threshold
+            effective_threshold = effective_base_threshold
             result.threshold_used_reason = "base_threshold"
+        
+        # Add boost info to reason if applied
+        if boost_reason:
+            result.threshold_used_reason += f" + {boost_reason}"
 
         result.threshold = effective_threshold
         result.pattern_threshold = self.threshold
@@ -343,7 +372,19 @@ class MultiLayerDecision:
         )
 
         # ── Decision ────────────────────────────────────────────────
+        # Require margin above threshold to filter borderline entries
+        # Score must be at least 3 points above threshold to execute
+        borderline_margin = 3.0
+        score_margin = result.combined_score - effective_threshold
+        
         if result.combined_score >= effective_threshold:
+            if score_margin < borderline_margin:
+                # Borderline entry - log warning but don't execute
+                result.execute = False
+                result.reasoning = (" | ".join(reasoning_parts) + 
+                    f" | BLOCKED: borderline EV ({result.combined_score:.1f} only {score_margin:.1f} above threshold {effective_threshold})")
+                return result
+            
             result.execute = True
             # Pick the best confirming signal to use for the trade
             if confirming_signals:
