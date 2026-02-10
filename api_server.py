@@ -12,7 +12,6 @@ from datetime import datetime
 
 from src.api_models import (
     BarInput,
-    MultiLayerConfig,
     SessionQuery,
     StrategyToggle,
     StrategyUpdate,
@@ -278,6 +277,7 @@ async def process_bar(bar: BarInput):
         'l2_iceberg_buy_count': bar.l2_iceberg_buy_count,
         'l2_iceberg_sell_count': bar.l2_iceberg_sell_count,
         'l2_iceberg_bias': bar.l2_iceberg_bias,
+        'intrabar_quotes_1s': bar.intrabar_quotes_1s,
     }
     
     result = day_trading_manager.process_bar(
@@ -423,6 +423,8 @@ async def get_trading_config():
         "adverse_flow_exit_enabled": day_trading_manager.adverse_flow_exit_enabled,
         "adverse_flow_threshold": day_trading_manager.adverse_flow_exit_threshold,
         "adverse_flow_min_hold_bars": day_trading_manager.adverse_flow_min_hold_bars,
+        "stop_loss_mode": day_trading_manager.stop_loss_mode,
+        "fixed_stop_loss_pct": day_trading_manager.fixed_stop_loss_pct,
     }
 
 
@@ -449,6 +451,8 @@ async def update_trading_config(config: TradingConfig):
     day_trading_manager.adverse_flow_exit_enabled = bool(config.adverse_flow_exit_enabled)
     day_trading_manager.adverse_flow_exit_threshold = max(0.02, float(config.adverse_flow_threshold))
     day_trading_manager.adverse_flow_min_hold_bars = max(1, int(config.adverse_flow_min_hold_bars))
+    day_trading_manager.stop_loss_mode = day_trading_manager._normalize_stop_loss_mode(config.stop_loss_mode)
+    day_trading_manager.fixed_stop_loss_pct = max(0.0, float(config.fixed_stop_loss_pct))
     
     return {
         "message": "Trading configuration updated",
@@ -469,6 +473,8 @@ async def update_trading_config(config: TradingConfig):
             "adverse_flow_exit_enabled": day_trading_manager.adverse_flow_exit_enabled,
             "adverse_flow_threshold": day_trading_manager.adverse_flow_exit_threshold,
             "adverse_flow_min_hold_bars": day_trading_manager.adverse_flow_min_hold_bars,
+            "stop_loss_mode": day_trading_manager.stop_loss_mode,
+            "fixed_stop_loss_pct": day_trading_manager.fixed_stop_loss_pct,
         }
     }
 
@@ -492,6 +498,8 @@ async def configure_session(
     adverse_flow_exit_enabled: bool = True,
     adverse_flow_threshold: float = 0.12,
     adverse_flow_min_hold_bars: int = 3,
+    stop_loss_mode: str = "strategy",
+    fixed_stop_loss_pct: float = 0.0,
     l2_confirm_enabled: bool = False,
     l2_min_delta: float = 0.0,
     l2_min_imbalance: float = 0.0,
@@ -501,6 +509,8 @@ async def configure_session(
     l2_min_directional_consistency: float = 0.0,
     l2_min_signed_aggression: float = 0.0,
     cold_start_each_day: bool = False,
+    strategy_selection_mode: str = "adaptive_top_n",
+    max_active_strategies: int = 3,
 ):
     """Configure session parameters before processing."""
     session = day_trading_manager.get_or_create_session(
@@ -526,6 +536,14 @@ async def configure_session(
     session.adverse_flow_exit_enabled = bool(adverse_flow_exit_enabled)
     session.adverse_flow_threshold = max(0.02, float(adverse_flow_threshold))
     session.adverse_flow_min_hold_bars = max(1, int(adverse_flow_min_hold_bars))
+    session.stop_loss_mode = day_trading_manager._normalize_stop_loss_mode(stop_loss_mode)
+    session.fixed_stop_loss_pct = max(0.0, float(fixed_stop_loss_pct))
+    session.strategy_selection_mode = day_trading_manager._normalize_strategy_selection_mode(
+        strategy_selection_mode
+    )
+    session.max_active_strategies = day_trading_manager._normalize_max_active_strategies(
+        max_active_strategies, default=3
+    )
     day_trading_manager.set_run_defaults(
         run_id=run_id,
         ticker=ticker,
@@ -543,6 +561,8 @@ async def configure_session(
         adverse_flow_exit_enabled=adverse_flow_exit_enabled,
         adverse_flow_threshold=adverse_flow_threshold,
         adverse_flow_min_hold_bars=adverse_flow_min_hold_bars,
+        stop_loss_mode=stop_loss_mode,
+        fixed_stop_loss_pct=fixed_stop_loss_pct,
         l2_confirm_enabled=l2_confirm_enabled,
         l2_min_delta=l2_min_delta,
         l2_min_imbalance=l2_min_imbalance,
@@ -552,81 +572,13 @@ async def configure_session(
         l2_min_directional_consistency=l2_min_directional_consistency,
         l2_min_signed_aggression=l2_min_signed_aggression,
         cold_start_each_day=cold_start_each_day,
+        strategy_selection_mode=strategy_selection_mode,
+        max_active_strategies=max_active_strategies,
     )
     
     return {
         "message": "Session configured",
         "session": session.to_dict()
-    }
-
-
-# ============ Multi-Layer Decision Engine Config ============
-
-@app.get("/api/multilayer/config")
-async def get_multilayer_config():
-    """Get current multi-layer decision engine configuration."""
-    ml = day_trading_manager.multi_layer
-    pd = ml.pattern_detector
-    return {
-        "pattern_weight": ml.pattern_weight,
-        "strategy_weight": ml.strategy_weight,
-        "threshold": ml.threshold,
-        "strategy_only_threshold": getattr(ml, "strategy_only_threshold", 0.0),
-        "require_pattern": ml.require_pattern,
-        "detector": {
-            "body_doji_pct": pd.body_doji_pct,
-            "wick_ratio_hammer": pd.wick_ratio_hammer,
-            "engulfing_min_body_pct": pd.engulfing_min_body_pct,
-            "volume_confirm_ratio": pd.volume_confirm_ratio,
-            "vwap_proximity_pct": pd.vwap_proximity_pct,
-        },
-    }
-
-
-@app.post("/api/multilayer/config")
-async def update_multilayer_config(config: MultiLayerConfig):
-    """Update multi-layer decision engine configuration."""
-    ml = day_trading_manager.multi_layer
-    pd = ml.pattern_detector
-    updated = {}
-
-    if config.pattern_weight is not None:
-        ml.pattern_weight = config.pattern_weight
-        updated["pattern_weight"] = config.pattern_weight
-    if config.strategy_weight is not None:
-        ml.strategy_weight = config.strategy_weight
-        updated["strategy_weight"] = config.strategy_weight
-    if config.threshold is not None:
-        ml.threshold = config.threshold
-        updated["threshold"] = config.threshold
-    if config.strategy_only_threshold is not None:
-        ml.strategy_only_threshold = max(0.0, float(config.strategy_only_threshold))
-        updated["strategy_only_threshold"] = ml.strategy_only_threshold
-    if config.require_pattern is not None:
-        ml.require_pattern = config.require_pattern
-        updated["require_pattern"] = config.require_pattern
-
-    # Detector settings
-    if config.body_doji_pct is not None:
-        pd.body_doji_pct = config.body_doji_pct
-        updated["body_doji_pct"] = config.body_doji_pct
-    if config.wick_ratio_hammer is not None:
-        pd.wick_ratio_hammer = config.wick_ratio_hammer
-        updated["wick_ratio_hammer"] = config.wick_ratio_hammer
-    if config.engulfing_min_body_pct is not None:
-        pd.engulfing_min_body_pct = config.engulfing_min_body_pct
-        updated["engulfing_min_body_pct"] = config.engulfing_min_body_pct
-    if config.volume_confirm_ratio is not None:
-        pd.volume_confirm_ratio = config.volume_confirm_ratio
-        updated["volume_confirm_ratio"] = config.volume_confirm_ratio
-    if config.vwap_proximity_pct is not None:
-        pd.vwap_proximity_pct = config.vwap_proximity_pct
-        updated["vwap_proximity_pct"] = config.vwap_proximity_pct
-
-    return {
-        "message": "Multi-layer config updated",
-        "updated": updated,
-        "current": (await get_multilayer_config()),
     }
 
 

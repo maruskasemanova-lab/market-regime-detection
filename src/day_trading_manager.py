@@ -15,7 +15,6 @@ import re
 logger = logging.getLogger(__name__)
 
 from .strategies.base_strategy import BaseStrategy, Signal, SignalType, Position, Regime
-from .multi_layer_decision import MultiLayerDecision
 from .strategy_factory import build_strategy_registry
 from .trading_orchestrator import TradingOrchestrator, OrchestratorConfig
 
@@ -51,6 +50,8 @@ class BarData:
     l2_iceberg_buy_count: Optional[float] = None
     l2_iceberg_sell_count: Optional[float] = None
     l2_iceberg_bias: Optional[float] = None
+    # Optional 1-second top-of-book quote snapshots for this minute.
+    intrabar_quotes_1s: Optional[List[Dict[str, float]]] = None
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -244,6 +245,8 @@ class TradingSession:
     micro_regime: str = "MIXED"
     active_strategies: List[str] = field(default_factory=list)
     selected_strategy: Optional[str] = None  # Helper for backwards compat logic
+    strategy_selection_mode: str = "adaptive_top_n"  # adaptive_top_n | all_enabled
+    max_active_strategies: int = 3
     
     # Data storage
     bars: List[BarData] = field(default_factory=list)
@@ -258,8 +261,8 @@ class TradingSession:
     pending_signal_bar_index: int = -1
     last_exit_bar_index: int = -1
     last_regime_refresh_bar_index: int = -1
+    last_strategy_switch_bar_index: int = -1
     regime_history: List[Dict[str, Any]] = field(default_factory=list)
-    multi_layer: Optional[MultiLayerDecision] = None
     orchestrator: Optional[TradingOrchestrator] = None
 
     # Market hours (ET)
@@ -292,6 +295,8 @@ class TradingSession:
     adverse_flow_exit_enabled: bool = True
     adverse_flow_threshold: float = 0.20
     adverse_flow_min_hold_bars: int = 6
+    stop_loss_mode: str = "strategy"  # strategy | fixed | capped
+    fixed_stop_loss_pct: float = 0.0
     l2_confirm_enabled: bool = False
     l2_min_delta: float = 0.0
     l2_min_imbalance: float = 0.0
@@ -300,10 +305,6 @@ class TradingSession:
     l2_min_participation_ratio: float = 0.0
     l2_min_directional_consistency: float = 0.0
     l2_min_signed_aggression: float = 0.0
-    multilayer_base_pattern_weight: Optional[float] = None
-    multilayer_base_strategy_weight: Optional[float] = None
-    multilayer_last_weight_source: str = "base"
-    
     def to_dict(self) -> Dict[str, Any]:
         return {
             'run_id': self.run_id,
@@ -314,6 +315,9 @@ class TradingSession:
             'micro_regime': self.micro_regime,
             'selected_strategy': self.selected_strategy,
             'active_strategies': list(self.active_strategies),
+            'strategy_selection_mode': self.strategy_selection_mode,
+            'max_active_strategies': self.max_active_strategies,
+            'last_strategy_switch_bar_index': self.last_strategy_switch_bar_index,
             'bars_count': len(self.bars),
             'pre_market_bars_count': len(self.pre_market_bars),
             'active_position': self.active_position.to_dict() if self.active_position else None,
@@ -331,9 +335,6 @@ class TradingSession:
             'l2_min_participation_ratio': self.l2_min_participation_ratio,
             'l2_min_directional_consistency': self.l2_min_directional_consistency,
             'l2_min_signed_aggression': self.l2_min_signed_aggression,
-            'multilayer_base_pattern_weight': self.multilayer_base_pattern_weight,
-            'multilayer_base_strategy_weight': self.multilayer_base_strategy_weight,
-            'multilayer_last_weight_source': self.multilayer_last_weight_source,
             'orchestrator_active': self.orchestrator is not None,
             'regime_refresh_bars': self.regime_refresh_bars,
             'regime_history': list(self.regime_history),
@@ -349,6 +350,8 @@ class TradingSession:
             'adverse_flow_exit_enabled': self.adverse_flow_exit_enabled,
             'adverse_flow_threshold': self.adverse_flow_threshold,
             'adverse_flow_min_hold_bars': self.adverse_flow_min_hold_bars,
+            'stop_loss_mode': self.stop_loss_mode,
+            'fixed_stop_loss_pct': self.fixed_stop_loss_pct,
         }
 
 
@@ -357,6 +360,11 @@ class DayTradingManager:
     Manages multiple trading sessions.
     Each session is identified by run_id + ticker + date.
     """
+    VALID_STOP_LOSS_MODES = {"strategy", "fixed", "capped"}
+    VALID_STRATEGY_SELECTION_MODES = {"adaptive_top_n", "all_enabled"}
+    MACRO_REGIME_KEYS = ("TRENDING", "CHOPPY", "MIXED")
+    MICRO_REGIME_KEYS = ("TRENDING_UP", "TRENDING_DOWN", "CHOPPY", "ABSORPTION", "BREAKOUT", "MIXED")
+    DEFAULT_FLOW_BIAS_STRATEGIES = ("momentum_flow", "absorption_reversal", "exhaustion_fade")
     
     def __init__(
         self,
@@ -375,6 +383,8 @@ class DayTradingManager:
         adverse_flow_exit_enabled: bool = True,
         adverse_flow_exit_threshold: float = 0.20,
         adverse_flow_min_hold_bars: int = 6,
+        stop_loss_mode: str = "strategy",
+        fixed_stop_loss_pct: float = 0.0,
     ):
         self.sessions: Dict[str, TradingSession] = {}  # session_key -> TradingSession
         self.regime_detection_minutes = regime_detection_minutes
@@ -394,18 +404,12 @@ class DayTradingManager:
         self.adverse_flow_exit_enabled = bool(adverse_flow_exit_enabled)
         self.adverse_flow_exit_threshold = max(0.02, float(adverse_flow_exit_threshold))
         self.adverse_flow_min_hold_bars = max(1, int(adverse_flow_min_hold_bars))
+        self.stop_loss_mode = self._normalize_stop_loss_mode(stop_loss_mode)
+        self.fixed_stop_loss_pct = max(0.0, float(fixed_stop_loss_pct))
         self.market_tz = ZoneInfo("America/New_York")
         self.run_defaults: Dict[tuple, Dict[str, Any]] = {}
         
         self.last_trade_bar_index = {}  # Track last trade bar per session
-
-        # Multi-layer decision engine
-        self.multi_layer = MultiLayerDecision(
-            pattern_weight=0.05,
-            strategy_weight=0.95,
-            threshold=65.0,
-            require_pattern=False,
-        )
 
         # Evidence-based orchestrator (new architecture)
         self.orchestrator = TradingOrchestrator()
@@ -525,8 +529,14 @@ class DayTradingManager:
                         'time_filter_enabled': ticker_config.get('time_filter_enabled', True),
                         'min_confidence': ticker_config.get('min_confidence', 65.0),
                         'max_daily_trades': ticker_config.get('max_daily_trades', 2),
-                        'multilayer': self._extract_ticker_multilayer_config(ticker_config),
+                        'strategy_selection_mode': self._normalize_strategy_selection_mode(
+                            ticker_config.get('strategy_selection_mode')
+                        ),
+                        'max_active_strategies': self._normalize_max_active_strategies(
+                            ticker_config.get('max_active_strategies'), default=3
+                        ),
                         'l2': ticker_config.get('l2', {}) if isinstance(ticker_config.get('l2'), dict) else {},
+                        'adaptive': self._normalize_adaptive_config(ticker_config.get('adaptive')),
                     }
 
                 self.ticker_params = loaded_ticker_params
@@ -583,6 +593,111 @@ class DayTradingManager:
                 return False
         return default
 
+    @classmethod
+    def _normalize_stop_loss_mode(cls, mode: Any) -> str:
+        normalized = str(mode or "strategy").strip().lower()
+        if normalized not in cls.VALID_STOP_LOSS_MODES:
+            return "strategy"
+        return normalized
+
+    @classmethod
+    def _normalize_strategy_selection_mode(cls, mode: Any) -> str:
+        normalized = str(mode or "adaptive_top_n").strip().lower()
+        if normalized not in cls.VALID_STRATEGY_SELECTION_MODES:
+            return "adaptive_top_n"
+        return normalized
+
+    @staticmethod
+    def _normalize_max_active_strategies(value: Any, default: int = 3) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = int(default)
+        return max(1, min(20, parsed))
+
+    @staticmethod
+    def _normalize_non_negative_int(value: Any, default: int = 0, max_value: int = 10_000) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = int(default)
+        return max(0, min(max_value, parsed))
+
+    def _default_macro_preference_map(self) -> Dict[str, List[str]]:
+        return {
+            "TRENDING": list(self.default_preference.get(Regime.TRENDING, [])),
+            "CHOPPY": list(self.default_preference.get(Regime.CHOPPY, [])),
+            "MIXED": list(self.default_preference.get(Regime.MIXED, [])),
+        }
+
+    def _normalize_strategy_list(
+        self,
+        raw_value: Any,
+        fallback: Optional[List[str]] = None,
+    ) -> List[str]:
+        source = raw_value if isinstance(raw_value, list) else list(fallback or [])
+        normalized: List[str] = []
+        seen = set()
+        for candidate in source:
+            name = self._canonical_strategy_key(candidate)
+            if not name or name in seen:
+                continue
+            if name not in self.strategies:
+                continue
+            seen.add(name)
+            normalized.append(name)
+        return normalized
+
+    def _normalize_preference_map(
+        self,
+        raw_value: Any,
+        keys: Tuple[str, ...],
+        fallback_map: Dict[str, List[str]],
+    ) -> Dict[str, List[str]]:
+        source = raw_value if isinstance(raw_value, dict) else {}
+        normalized: Dict[str, List[str]] = {}
+        for key in keys:
+            normalized[key] = self._normalize_strategy_list(
+                source.get(key),
+                fallback=fallback_map.get(key, []),
+            )
+        return normalized
+
+    def _normalize_adaptive_config(self, raw_value: Any) -> Dict[str, Any]:
+        raw = raw_value if isinstance(raw_value, dict) else {}
+        macro_defaults = self._default_macro_preference_map()
+        micro_defaults = {
+            key: list(values)
+            for key, values in self.micro_regime_preference.items()
+            if key in self.MICRO_REGIME_KEYS
+        }
+        return {
+            "flow_bias_enabled": self._safe_bool(raw.get("flow_bias_enabled"), True),
+            "use_ohlcv_fallbacks": self._safe_bool(raw.get("use_ohlcv_fallbacks"), True),
+            "min_active_bars_before_switch": self._normalize_non_negative_int(
+                raw.get("min_active_bars_before_switch"),
+                default=0,
+            ),
+            "switch_cooldown_bars": self._normalize_non_negative_int(
+                raw.get("switch_cooldown_bars"),
+                default=0,
+            ),
+            "flow_bias_strategies": self._normalize_strategy_list(
+                raw.get("flow_bias_strategies"),
+                fallback=list(self.DEFAULT_FLOW_BIAS_STRATEGIES),
+            ),
+            "regime_preferences": self._normalize_preference_map(
+                raw.get("regime_preferences"),
+                keys=self.MACRO_REGIME_KEYS,
+                fallback_map=macro_defaults,
+            ),
+            "micro_regime_preferences": self._normalize_preference_map(
+                raw.get("micro_regime_preferences"),
+                keys=self.MICRO_REGIME_KEYS,
+                fallback_map=micro_defaults,
+            ),
+        }
+
     def _latest_indicator_value(
         self,
         indicators: Dict[str, Any],
@@ -614,106 +729,6 @@ class DayTradingManager:
                 value = sum(tr_values[-window:]) / window
 
         return float(value) if value is not None else 0.0
-
-    def _extract_ticker_multilayer_config(self, ticker_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract ticker-specific multi-layer/candlestick settings."""
-        allowed_core = {
-            "pattern_weight",
-            "strategy_weight",
-            "threshold",
-            "require_pattern",
-            "strategy_only_threshold",
-        }
-        allowed_detector = {
-            "body_doji_pct",
-            "wick_ratio_hammer",
-            "engulfing_min_body_pct",
-            "volume_confirm_ratio",
-            "vwap_proximity_pct",
-        }
-
-        raw: Dict[str, Any] = {}
-        for key in ("multilayer", "multi_layer"):
-            block = ticker_config.get(key)
-            if isinstance(block, dict):
-                raw.update(block)
-
-        candlestick = ticker_config.get("candlestick")
-        if isinstance(candlestick, dict):
-            nested_ml = candlestick.get("multilayer")
-            if isinstance(nested_ml, dict):
-                raw.update(nested_ml)
-            detector = candlestick.get("detector")
-            if isinstance(detector, dict):
-                raw.update(detector)
-            for key in allowed_core.union(allowed_detector):
-                if key in candlestick:
-                    raw[key] = candlestick[key]
-
-        for key in allowed_core.union(allowed_detector):
-            if key in ticker_config and key not in raw:
-                raw[key] = ticker_config[key]
-
-        nested_detector = raw.get("detector")
-        if isinstance(nested_detector, dict):
-            for key in allowed_detector:
-                if key in nested_detector and key not in raw:
-                    raw[key] = nested_detector[key]
-
-        out: Dict[str, Any] = {}
-        for key in ("pattern_weight", "strategy_weight", "threshold", "strategy_only_threshold"):
-            if key not in raw:
-                continue
-            value = self._safe_float(raw.get(key))
-            if value is not None:
-                out[key] = value
-
-        if "require_pattern" in raw:
-            out["require_pattern"] = self._safe_bool(raw.get("require_pattern"), default=False)
-
-        for key in allowed_detector:
-            if key not in raw:
-                continue
-            value = self._safe_float(raw.get(key))
-            if value is not None:
-                out[key] = value
-
-        return out
-
-    def _build_multilayer_for_ticker(self, ticker: str) -> MultiLayerDecision:
-        """Build a per-session multi-layer engine using ticker overrides."""
-        ticker_cfg = self.ticker_params.get(str(ticker).upper(), {})
-        ml_overrides = ticker_cfg.get("multilayer", {}) if isinstance(ticker_cfg, dict) else {}
-
-        base_ml = self.multi_layer
-        strategy_weight = float(ml_overrides.get("strategy_weight", base_ml.strategy_weight))
-        ml = MultiLayerDecision(
-            pattern_weight=float(ml_overrides.get("pattern_weight", base_ml.pattern_weight)),
-            strategy_weight=strategy_weight,
-            threshold=float(ml_overrides.get("threshold", base_ml.threshold)),
-            require_pattern=self._safe_bool(
-                ml_overrides.get("require_pattern", base_ml.require_pattern),
-                default=base_ml.require_pattern,
-            ),
-            strategy_only_threshold=float(
-                ml_overrides.get("strategy_only_threshold", getattr(base_ml, "strategy_only_threshold", 0.0))
-            ),
-        )
-
-        detector = ml.pattern_detector
-        base_detector = base_ml.pattern_detector
-        detector.body_doji_pct = float(ml_overrides.get("body_doji_pct", base_detector.body_doji_pct))
-        detector.wick_ratio_hammer = float(ml_overrides.get("wick_ratio_hammer", base_detector.wick_ratio_hammer))
-        detector.engulfing_min_body_pct = float(
-            ml_overrides.get("engulfing_min_body_pct", base_detector.engulfing_min_body_pct)
-        )
-        detector.volume_confirm_ratio = float(
-            ml_overrides.get("volume_confirm_ratio", base_detector.volume_confirm_ratio)
-        )
-        detector.vwap_proximity_pct = float(
-            ml_overrides.get("vwap_proximity_pct", base_detector.vwap_proximity_pct)
-        )
-        return ml
 
     def _is_day_allowed(self, date_str: str, ticker: str) -> bool:
         """Check if trading day is allowed by ticker-specific avoid_days."""
@@ -790,7 +805,7 @@ class DayTradingManager:
         
         if key not in self.sessions:
             # Refresh AOS config for newly created sessions so dashboard updates
-            # (including candlestick/multi-layer thresholds) are picked up.
+            # are picked up.
             self._load_aos_config()
             # Defensive reset: if a previous run used the same session key,
             # stale cooldown state must not leak into the new replay.
@@ -814,10 +829,8 @@ class DayTradingManager:
             self.sessions[key].adverse_flow_exit_enabled = self.adverse_flow_exit_enabled
             self.sessions[key].adverse_flow_threshold = self.adverse_flow_exit_threshold
             self.sessions[key].adverse_flow_min_hold_bars = self.adverse_flow_min_hold_bars
-            self.sessions[key].multi_layer = self._build_multilayer_for_ticker(ticker)
-            if self.sessions[key].multi_layer is not None:
-                self.sessions[key].multilayer_base_pattern_weight = float(self.sessions[key].multi_layer.pattern_weight)
-                self.sessions[key].multilayer_base_strategy_weight = float(self.sessions[key].multi_layer.strategy_weight)
+            self.sessions[key].stop_loss_mode = self.stop_loss_mode
+            self.sessions[key].fixed_stop_loss_pct = self.fixed_stop_loss_pct
             ticker_cfg = self.ticker_params.get(str(ticker).upper(), {})
             l2_cfg = ticker_cfg.get("l2", {}) if isinstance(ticker_cfg, dict) else {}
             if isinstance(l2_cfg, dict):
@@ -843,6 +856,12 @@ class DayTradingManager:
                 self.sessions[key].l2_min_signed_aggression = self._safe_float(
                     l2_cfg.get("min_signed_aggression"), 0.0
                 ) or 0.0
+            self.sessions[key].strategy_selection_mode = self._normalize_strategy_selection_mode(
+                ticker_cfg.get("strategy_selection_mode")
+            )
+            self.sessions[key].max_active_strategies = self._normalize_max_active_strategies(
+                ticker_cfg.get("max_active_strategies"), default=3
+            )
 
             # Attach orchestrator and reset session state for new day
             if self.orchestrator is not None:
@@ -876,6 +895,8 @@ class DayTradingManager:
         adverse_flow_exit_enabled: Optional[bool] = None,
         adverse_flow_threshold: Optional[float] = None,
         adverse_flow_min_hold_bars: Optional[int] = None,
+        stop_loss_mode: Optional[str] = None,
+        fixed_stop_loss_pct: Optional[float] = None,
         l2_confirm_enabled: Optional[bool] = None,
         l2_min_delta: Optional[float] = None,
         l2_min_imbalance: Optional[float] = None,
@@ -885,6 +906,8 @@ class DayTradingManager:
         l2_min_directional_consistency: Optional[float] = None,
         l2_min_signed_aggression: Optional[float] = None,
         cold_start_each_day: Optional[bool] = None,
+        strategy_selection_mode: Optional[str] = None,
+        max_active_strategies: Optional[int] = None,
     ) -> None:
         """Set default parameters for all sessions in a run."""
         key = (run_id, ticker)
@@ -917,6 +940,10 @@ class DayTradingManager:
             defaults["adverse_flow_threshold"] = max(0.02, float(adverse_flow_threshold))
         if adverse_flow_min_hold_bars is not None:
             defaults["adverse_flow_min_hold_bars"] = max(1, int(adverse_flow_min_hold_bars))
+        if stop_loss_mode is not None:
+            defaults["stop_loss_mode"] = self._normalize_stop_loss_mode(stop_loss_mode)
+        if fixed_stop_loss_pct is not None:
+            defaults["fixed_stop_loss_pct"] = max(0.0, float(fixed_stop_loss_pct))
         if l2_confirm_enabled is not None:
             defaults["l2_confirm_enabled"] = bool(l2_confirm_enabled)
         if l2_min_delta is not None:
@@ -935,6 +962,14 @@ class DayTradingManager:
             defaults["l2_min_signed_aggression"] = float(l2_min_signed_aggression)
         if cold_start_each_day is not None:
             defaults["cold_start_each_day"] = bool(cold_start_each_day)
+        if strategy_selection_mode is not None:
+            defaults["strategy_selection_mode"] = self._normalize_strategy_selection_mode(
+                strategy_selection_mode
+            )
+        if max_active_strategies is not None:
+            defaults["max_active_strategies"] = self._normalize_max_active_strategies(
+                max_active_strategies, default=3
+            )
         self.run_defaults[key] = defaults
     
     def get_session(self, run_id: str, ticker: str, date: str) -> Optional[TradingSession]:
@@ -947,7 +982,7 @@ class DayTradingManager:
         run_id: str,
         ticker: str,
         timestamp: datetime,
-        bar_data: Dict[str, float]
+        bar_data: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
         Process a new bar for the session.
@@ -995,6 +1030,10 @@ class DayTradingManager:
             session.adverse_flow_threshold = max(0.02, float(defaults["adverse_flow_threshold"]))
         if "adverse_flow_min_hold_bars" in defaults:
             session.adverse_flow_min_hold_bars = max(1, int(defaults["adverse_flow_min_hold_bars"]))
+        if "stop_loss_mode" in defaults:
+            session.stop_loss_mode = self._normalize_stop_loss_mode(defaults["stop_loss_mode"])
+        if "fixed_stop_loss_pct" in defaults:
+            session.fixed_stop_loss_pct = max(0.0, float(defaults["fixed_stop_loss_pct"]))
         if "regime_refresh_bars" in defaults:
             session.regime_refresh_bars = max(3, int(defaults["regime_refresh_bars"]))
         if "l2_confirm_enabled" in defaults:
@@ -1013,6 +1052,14 @@ class DayTradingManager:
             session.l2_min_directional_consistency = float(defaults["l2_min_directional_consistency"])
         if "l2_min_signed_aggression" in defaults:
             session.l2_min_signed_aggression = float(defaults["l2_min_signed_aggression"])
+        if "strategy_selection_mode" in defaults:
+            session.strategy_selection_mode = self._normalize_strategy_selection_mode(
+                defaults["strategy_selection_mode"]
+            )
+        if "max_active_strategies" in defaults:
+            session.max_active_strategies = self._normalize_max_active_strategies(
+                defaults["max_active_strategies"], default=3
+            )
         if session.phase == SessionPhase.CLOSED:
              return {'action': 'skipped_finished_session'}
         
@@ -1043,6 +1090,7 @@ class DayTradingManager:
             l2_iceberg_buy_count=bar_data.get('l2_iceberg_buy_count'),
             l2_iceberg_sell_count=bar_data.get('l2_iceberg_sell_count'),
             l2_iceberg_bias=bar_data.get('l2_iceberg_bias'),
+            intrabar_quotes_1s=bar_data.get('intrabar_quotes_1s'),
         )
 
         # Feed every bar (incl. pre-market) to orchestrator feature store
@@ -1126,6 +1174,7 @@ class DayTradingManager:
                         "strategies": list(active_strategies),
                     }
                 )
+                session.last_strategy_switch_bar_index = session.last_regime_refresh_bar_index
                 
                 # Transition to trading
                 session.phase = SessionPhase.TRADING
@@ -1540,6 +1589,13 @@ class DayTradingManager:
         micro_regime = (session.micro_regime or "MIXED").upper()
         ticker = session.ticker.upper()
         ticker_cfg = self.ticker_params.get(ticker.upper(), {})
+        adaptive_cfg = self._normalize_adaptive_config(ticker_cfg.get("adaptive"))
+        selection_mode = self._normalize_strategy_selection_mode(
+            session.strategy_selection_mode or ticker_cfg.get("strategy_selection_mode")
+        )
+        max_active = self._normalize_max_active_strategies(
+            session.max_active_strategies or ticker_cfg.get("max_active_strategies"), default=3
+        )
 
         # Optional AOS regime filter: if the regime is explicitly disallowed, skip trading.
         allowed_regimes_cfg = {
@@ -1562,8 +1618,19 @@ class DayTradingManager:
         if backup:
             candidates.append(backup)
 
-        # Flow-first micro-regime preferences.
-        candidates.extend(self.micro_regime_preference.get(micro_regime, []))
+        # Flow-first micro-regime preferences (adaptive override -> defaults).
+        adaptive_micro_preferences = adaptive_cfg.get("micro_regime_preferences", {})
+        micro_candidates = []
+        if isinstance(adaptive_micro_preferences, dict):
+            micro_candidates = list(adaptive_micro_preferences.get(micro_regime, []))
+        if not micro_candidates:
+            micro_candidates = list(self.micro_regime_preference.get(micro_regime, []))
+        candidates.extend(micro_candidates)
+
+        # Macro regime ordering: adaptive override first, then ticker/global defaults.
+        adaptive_regime_preferences = adaptive_cfg.get("regime_preferences", {})
+        if isinstance(adaptive_regime_preferences, dict):
+            candidates.extend(adaptive_regime_preferences.get(regime.value, []))
 
         ticker_prefs = self.ticker_preferences.get(ticker, {})
         candidates.extend(ticker_prefs.get(regime, []))
@@ -1572,9 +1639,17 @@ class DayTradingManager:
         # If L2 coverage is present on current bars, bias toward flow strategies.
         # Otherwise, add OHLCV-based strategies as fallbacks.
         flow_metrics = self._calculate_order_flow_metrics(session.bars, lookback=min(20, len(session.bars)))
+        flow_bias_enabled = self._safe_bool(adaptive_cfg.get("flow_bias_enabled"), True)
+        use_ohlcv_fallbacks = self._safe_bool(adaptive_cfg.get("use_ohlcv_fallbacks"), True)
+        flow_bias_strategies = self._normalize_strategy_list(
+            adaptive_cfg.get("flow_bias_strategies"),
+            fallback=list(self.DEFAULT_FLOW_BIAS_STRATEGIES),
+        )
+
         if flow_metrics.get("has_l2_coverage", False):
-            candidates = ['momentum_flow', 'absorption_reversal', 'exhaustion_fade'] + candidates
-        else:
+            if flow_bias_enabled and flow_bias_strategies:
+                candidates = flow_bias_strategies + candidates
+        elif use_ohlcv_fallbacks:
             # No L2 data available — add OHLCV strategies so the evidence engine
             # has strategy signals to work with.
             ohlcv_fallbacks = {
@@ -1608,8 +1683,25 @@ class DayTradingManager:
                 if regime not in getattr(strat, "allowed_regimes", [regime]):
                     continue
                 filtered.append(name)
+        eligible_enabled: List[str] = []
+        for name, strat in self.strategies.items():
+            if not getattr(strat, "enabled", True):
+                continue
+            if regime not in getattr(strat, "allowed_regimes", [regime]):
+                continue
+            eligible_enabled.append(name)
 
-        return filtered[:3]
+        if selection_mode == "all_enabled":
+            selected: List[str] = []
+            selected_seen = set()
+            for name in filtered + eligible_enabled:
+                if name in selected_seen:
+                    continue
+                selected_seen.add(name)
+                selected.append(name)
+            return selected
+
+        return filtered[:max_active]
     
     def _calc_trend_efficiency(self, bars: List[BarData]) -> float:
         """Calculate trend efficiency (net move / total move)."""
@@ -1840,6 +1932,8 @@ class DayTradingManager:
         prev_macro = session.detected_regime or Regime.MIXED
         prev_micro = session.micro_regime
         prev_active = list(session.active_strategies)
+        ticker_cfg = self.ticker_params.get(session.ticker.upper(), {})
+        adaptive_cfg = self._normalize_adaptive_config(ticker_cfg.get("adaptive"))
 
         new_macro = self._detect_regime(session)
 
@@ -1861,17 +1955,59 @@ class DayTradingManager:
             session._pending_regime = None
             session.detected_regime = new_macro
 
-        new_active = self._select_strategies(session)
-        session.active_strategies = new_active
+        requested_active = self._select_strategies(session)
+        effective_active = list(requested_active)
+        switch_guard = {
+            "blocked": False,
+            "reasons": [],
+            "requested": list(requested_active),
+            "effective": list(requested_active),
+            "min_active_bars_before_switch": int(
+                adaptive_cfg.get("min_active_bars_before_switch", 0)
+            ),
+            "switch_cooldown_bars": int(adaptive_cfg.get("switch_cooldown_bars", 0)),
+        }
+
+        strategy_changed = requested_active != prev_active
+        if strategy_changed and prev_active:
+            min_active_bars = self._normalize_non_negative_int(
+                adaptive_cfg.get("min_active_bars_before_switch"), default=0
+            )
+            cooldown_bars = self._normalize_non_negative_int(
+                adaptive_cfg.get("switch_cooldown_bars"), default=0
+            )
+            last_switch_bar = int(getattr(session, "last_strategy_switch_bar_index", -1))
+            bars_since_switch = (
+                current_bar_index - last_switch_bar if last_switch_bar >= 0 else 1_000_000
+            )
+
+            if min_active_bars > 0 and bars_since_switch < min_active_bars:
+                switch_guard["blocked"] = True
+                switch_guard["reasons"].append(
+                    f"min_active_bars ({bars_since_switch}/{min_active_bars})"
+                )
+            if cooldown_bars > 0 and bars_since_switch < cooldown_bars:
+                switch_guard["blocked"] = True
+                switch_guard["reasons"].append(
+                    f"switch_cooldown ({bars_since_switch}/{cooldown_bars})"
+                )
+
+            if switch_guard["blocked"]:
+                effective_active = list(prev_active)
+
+        session.active_strategies = effective_active
         session.selected_strategy = (
-            "adaptive" if len(new_active) > 1 else (new_active[0] if new_active else None)
+            "adaptive" if len(effective_active) > 1 else (effective_active[0] if effective_active else None)
         )
+        if effective_active != prev_active:
+            session.last_strategy_switch_bar_index = current_bar_index
         session.last_regime_refresh_bar_index = current_bar_index
+        switch_guard["effective"] = list(effective_active)
 
         changed = (
             new_macro != prev_macro
             or session.micro_regime != prev_micro
-            or new_active != prev_active
+            or effective_active != prev_active
         )
         if not changed:
             return None
@@ -1884,10 +2020,12 @@ class DayTradingManager:
             "bar_index": current_bar_index,
             "regime": new_macro.value,
             "micro_regime": session.micro_regime,
-            "strategies": list(new_active),
+            "strategies": list(effective_active),
             "strategy": session.selected_strategy,
             "previous_regime": prev_macro.value,
             "previous_micro_regime": prev_micro,
+            "previous_strategies": list(prev_active),
+            "switch_guard": switch_guard,
             "indicators": {
                 "trend_efficiency": self._calc_trend_efficiency(session.bars),
                 "volatility": self._calc_volatility(session.bars),
@@ -2138,7 +2276,6 @@ class DayTradingManager:
             
             # ── Decision Engine ────────────────────────────────────
             orch = session.orchestrator
-            use_evidence = (orch is not None and orch.config.use_evidence_engine)
 
             bars_data = session.bars[-100:] if len(session.bars) >= 100 else session.bars
             ohlcv = {
@@ -2155,73 +2292,51 @@ class DayTradingManager:
             ticker_cfg = self.ticker_params.get(session.ticker.upper(), {})
             is_long_only = bool(ticker_cfg.get("long_only", False))
 
+            if self._is_mu_choppy_blocked(session, regime):
+                result['action'] = 'regime_filter'
+                result['reason'] = "MU choppy regime filter active"
+                result['signal_rejected'] = {
+                    'gate': 'mu_choppy_filter',
+                    'ticker': session.ticker,
+                    'regime': regime.value if regime else None,
+                    'micro_regime': session.micro_regime,
+                    'timestamp': timestamp.isoformat(),
+                }
+                return result
+
             def gen_signal_fn():
                 return self._generate_signal(session, bar, timestamp)
 
             tod_boost = self._time_of_day_threshold_boost(bar_time)
+            required_confirming_sources = self._required_confirming_sources(session, bar_time)
+            if orch is None:
+                raise RuntimeError("Orchestrator is not initialized")
+            if not orch.config.use_evidence_engine:
+                # Hard-disable legacy decision mode: execution is evidence-only.
+                orch.config.use_evidence_engine = True
 
-            if use_evidence:
-                # === Evidence-Based Decision Engine ===
-                decision = orch.evidence_engine.evaluate(
-                    ohlcv=ohlcv,
-                    indicators=indicators,
-                    regime=regime,
-                    strategies=self.strategies,
-                    active_strategy_names=session.active_strategies,
-                    current_price=current_price,
-                    timestamp=timestamp,
-                    ticker=session.ticker,
-                    generate_signal_fn=gen_signal_fn,
-                    is_long_only=is_long_only,
-                    feature_vector=orch.current_feature_vector,
-                    regime_state=orch.current_regime_state,
-                    cross_asset_state=orch.current_cross_asset_state,
-                    time_of_day_boost=tod_boost,
-                )
-                ml_engine = session.multi_layer or self.multi_layer
-                effective_weights = self._resolve_multilayer_weights(session, ml_engine, flow_metrics)
-
-            else:
-                # === Legacy Multi-Layer Decision Engine ===
-                ml_engine = session.multi_layer or self.multi_layer
-                effective_weights = self._resolve_multilayer_weights(session, ml_engine, flow_metrics)
-                ml_engine.pattern_weight = effective_weights["pattern_weight"]
-                ml_engine.strategy_weight = effective_weights["strategy_weight"]
-                session.multilayer_last_weight_source = effective_weights["strategy_weight_source"]
-
-                original_threshold = ml_engine.threshold
-                original_sot = ml_engine.strategy_only_threshold
-                if tod_boost > 0:
-                    ml_engine.threshold = original_threshold + tod_boost
-                    if ml_engine.strategy_only_threshold > 0:
-                        ml_engine.strategy_only_threshold = original_sot + tod_boost
-
-                decision = ml_engine.evaluate(
-                    ohlcv=ohlcv,
-                    indicators=indicators,
-                    regime=regime,
-                    strategies=self.strategies,
-                    active_strategy_names=session.active_strategies,
-                    current_price=current_price,
-                    timestamp=timestamp,
-                    ticker=session.ticker,
-                    generate_signal_fn=gen_signal_fn,
-                    is_long_only=is_long_only,
-                    micro_regime=micro_regime,
-                    trend_efficiency=indicators.get('trend_efficiency'),
-                )
-
-                if tod_boost > 0:
-                    ml_engine.threshold = original_threshold
-                    ml_engine.strategy_only_threshold = original_sot
-
-            # Always report detected patterns for frontend visibility
-            if decision.patterns:
-                result['patterns_detected'] = [p.to_dict() for p in decision.patterns]
+            decision = orch.evidence_engine.evaluate(
+                ohlcv=ohlcv,
+                indicators=indicators,
+                regime=regime,
+                strategies=self.strategies,
+                active_strategy_names=session.active_strategies,
+                current_price=current_price,
+                timestamp=timestamp,
+                ticker=session.ticker,
+                generate_signal_fn=gen_signal_fn,
+                is_long_only=is_long_only,
+                feature_vector=orch.current_feature_vector,
+                regime_state=orch.current_regime_state,
+                cross_asset_state=orch.current_cross_asset_state,
+                time_of_day_boost=tod_boost,
+            )
+            effective_weights = self._resolve_evidence_weight_context(flow_metrics)
 
             # Always report layer scores
             combined_raw = float(getattr(decision, "combined_raw", decision.combined_score) or 0.0)
             combined_norm = getattr(decision, "combined_norm_0_100", None)
+            pattern_weight_for_scores = 0.0
             result['layer_scores'] = {
                 'schema_version': 2,
                 'pattern_score': round(decision.pattern_score, 1),
@@ -2230,22 +2345,22 @@ class DayTradingManager:
                 'combined_raw': round(combined_raw, 1),
                 'combined_norm_0_100': round(float(combined_norm), 1) if combined_norm is not None else None,
                 'threshold': decision.threshold,
-                'pattern_threshold': float(getattr(decision, "pattern_threshold", ml_engine.threshold)),
+                'pattern_threshold': float(getattr(decision, "pattern_threshold", decision.threshold)),
                 'trade_gate_threshold': float(getattr(decision, "trade_gate_threshold", decision.threshold)),
                 'threshold_used': float(decision.threshold),
                 'threshold_used_reason': getattr(decision, "threshold_used_reason", "base_threshold"),
-                'pattern_confirmation': bool(getattr(decision, "pattern_confirmation", decision.pattern_score > 0)),
-                'pattern_direction': decision.direction,
-                'pattern_weight': round(float(effective_weights["pattern_weight"]), 3),
+                'pattern_confirmation': False,
+                'pattern_direction': None,
+                'pattern_weight': round(pattern_weight_for_scores, 3),
                 'strategy_weight': round(float(effective_weights["strategy_weight"]), 3),
                 'strategy_weight_source': effective_weights["strategy_weight_source"],
                 'l2_has_coverage': bool(effective_weights["l2_has_coverage"]),
                 'l2_quality_ok': bool(effective_weights["l2_quality_ok"]),
                 'l2_coverage_ratio': round(float(effective_weights["l2_coverage_ratio"]), 3),
                 'weights_snapshot': {
-                    'base_pattern_weight': round(float(effective_weights["base_pattern_weight"]), 3),
+                    'base_pattern_weight': 0.0,
                     'base_strategy_weight': round(float(effective_weights["base_strategy_weight"]), 3),
-                    'effective_pattern_weight': round(float(effective_weights["pattern_weight"]), 3),
+                    'effective_pattern_weight': 0.0,
                     'effective_strategy_weight': round(float(effective_weights["strategy_weight"]), 3),
                     'strategy_weight_source': effective_weights["strategy_weight_source"],
                 },
@@ -2257,7 +2372,8 @@ class DayTradingManager:
                 'micro_regime': session.micro_regime,
                 'passed': decision.execute,
                 'tod_threshold_boost': tod_boost,
-                'engine': 'evidence_v1' if use_evidence else 'multilayer_v2',
+                'required_confirming_sources': required_confirming_sources,
+                'engine': 'evidence_v1',
             }
 
             if decision.execute and decision.signal:
@@ -2283,7 +2399,66 @@ class DayTradingManager:
                     }
                     return result
 
+                confirming_stats = self._confirming_source_stats(signal)
+                confirming_sources = confirming_stats['confirming_sources']
+                result['layer_scores']['confirming_sources'] = confirming_sources
+                result['layer_scores']['confirming_sources_source'] = confirming_stats['count_source']
+                result['layer_scores']['aligned_evidence_sources'] = confirming_stats['aligned_evidence_sources']
+                result['layer_scores']['aligned_source_keys'] = confirming_stats['aligned_source_keys']
+
+                if confirming_sources < required_confirming_sources:
+                    result['action'] = 'confirming_sources_filtered'
+                    result['reason'] = (
+                        f"Confirming sources {confirming_sources} below required "
+                        f"{required_confirming_sources}"
+                    )
+                    result['signal_rejected'] = {
+                        'gate': 'confirming_sources',
+                        'strategy': signal.strategy_name,
+                        'signal_type': signal.signal_type.value if signal.signal_type else None,
+                        'confidence': round(signal.confidence, 1),
+                        'combined_score': round(decision.combined_score, 1),
+                        'threshold_used': decision.threshold,
+                        'regime': regime.value if regime else None,
+                        'micro_regime': session.micro_regime,
+                        'actual_confirming_sources': confirming_sources,
+                        'required_confirming_sources': required_confirming_sources,
+                        'aligned_evidence_sources': confirming_stats['aligned_evidence_sources'],
+                        'count_source': confirming_stats['count_source'],
+                        'aligned_source_keys': confirming_stats['aligned_source_keys'],
+                        'tod_threshold_boost': tod_boost,
+                        'timestamp': timestamp.isoformat(),
+                    }
+                    return result
+
+                momentum_flow_passed, momentum_flow_metrics = (
+                    self._passes_momentum_flow_delta_confirmation(signal)
+                )
+                result['momentum_flow_confirmation'] = momentum_flow_metrics
+
+                if not momentum_flow_passed:
+                    result['action'] = 'momentum_flow_filtered'
+                    result['reason'] = momentum_flow_metrics.get(
+                        'reason',
+                        'momentum_flow_delta_divergence_required',
+                    )
+                    result['signal_rejected'] = {
+                        'gate': 'momentum_flow_delta_divergence',
+                        'strategy': signal.strategy_name,
+                        'signal_type': signal.signal_type.value if signal.signal_type else None,
+                        'confidence': round(signal.confidence, 1),
+                        'combined_score': round(decision.combined_score, 1),
+                        'threshold_used': decision.threshold,
+                        'regime': regime.value if regime else None,
+                        'micro_regime': session.micro_regime,
+                        'momentum_flow_confirmation': momentum_flow_metrics,
+                        'tod_threshold_boost': tod_boost,
+                        'timestamp': timestamp.isoformat(),
+                    }
+                    return result
+
                 signal.metadata.setdefault('l2_confirmation', l2_metrics)
+                signal.metadata.setdefault('momentum_flow_confirmation', momentum_flow_metrics)
                 # Enrich signal metadata with regime context for post-mortem
                 signal.metadata['regime'] = regime.value if regime else None
                 signal.metadata['micro_regime'] = session.micro_regime
@@ -2371,6 +2546,18 @@ class DayTradingManager:
         if both stop and target are hit, stop wins.
         """
         stop_level, stop_reason = self._effective_stop_for_position(pos)
+
+        intrabar_quotes = getattr(bar, "intrabar_quotes_1s", None)
+        if intrabar_quotes:
+            intrabar_exit = self._resolve_exit_from_intrabar_quotes(
+                pos=pos,
+                stop_level=stop_level,
+                stop_reason=stop_reason,
+                intrabar_quotes=intrabar_quotes,
+            )
+            if intrabar_exit:
+                return intrabar_exit
+
         if pos.side == 'long':
             stop_hit = stop_level is not None and bar.low <= stop_level
             tp_hit = pos.take_profit > 0 and bar.high >= pos.take_profit
@@ -2382,6 +2569,62 @@ class DayTradingManager:
             return (stop_reason or "stop_loss", float(stop_level))
         if tp_hit:
             return ("take_profit", float(pos.take_profit))
+        return None
+
+    @staticmethod
+    def _safe_intrabar_quote(value: Any) -> float:
+        try:
+            if value is None:
+                return 0.0
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _resolve_exit_from_intrabar_quotes(
+        self,
+        pos: Position,
+        stop_level: Optional[float],
+        stop_reason: Optional[str],
+        intrabar_quotes: List[Dict[str, float]],
+    ) -> Optional[tuple]:
+        """
+        Resolve SL/TP using 1-second bid/ask sequence for the current minute.
+
+        No look-ahead guarantee:
+        - Uses only the quotes embedded for this bar's minute.
+        - Processes in second order; first trigger wins.
+        - Same-second conflicts remain conservative (stop wins).
+        """
+        if not intrabar_quotes:
+            return None
+
+        rows = sorted(
+            (row for row in intrabar_quotes if isinstance(row, dict)),
+            key=lambda row: int(self._safe_intrabar_quote(row.get("s", 0))),
+        )
+        if not rows:
+            return None
+
+        for row in rows:
+            bid = self._safe_intrabar_quote(row.get("bid"))
+            ask = self._safe_intrabar_quote(row.get("ask"))
+            if bid <= 0 and ask <= 0:
+                continue
+
+            if pos.side == "long":
+                # Exit of long is a sell -> executable on bid.
+                stop_hit = stop_level is not None and bid > 0 and bid <= float(stop_level)
+                tp_hit = pos.take_profit > 0 and bid > 0 and bid >= float(pos.take_profit)
+            else:
+                # Exit of short is a buy -> executable on ask.
+                stop_hit = stop_level is not None and ask > 0 and ask >= float(stop_level)
+                tp_hit = pos.take_profit > 0 and ask > 0 and ask <= float(pos.take_profit)
+
+            if stop_hit:
+                return (stop_reason or "stop_loss", float(stop_level))
+            if tp_hit:
+                return ("take_profit", float(pos.take_profit))
+
         return None
 
     def _update_trailing_from_close(self, session: TradingSession, pos: Position, bar: BarData) -> None:
@@ -2396,6 +2639,11 @@ class DayTradingManager:
         # 1. Skip trailing in CHOPPY if disabled
         if session.detected_regime == Regime.CHOPPY and not session.trailing_enabled_in_choppy:
             return
+
+        # Avoid instant break-even flips; let the trade breathe for a few bars.
+        current_bar_index = max(0, len(session.bars) - 1)
+        bars_held = self._bars_held(pos, current_bar_index)
+        min_hold_for_break_even = 2
         
         # Always update price tracking for MFE calculation
         if pos.side == 'long':
@@ -2408,7 +2656,7 @@ class DayTradingManager:
             mfe_pct = (pos.entry_price - pos.lowest_price) / pos.entry_price * 100
         
         # 2. Check if trailing activation threshold met
-        if mfe_pct >= session.trailing_activation_pct:
+        if mfe_pct >= session.trailing_activation_pct and bars_held >= min_hold_for_break_even:
             pos.trailing_activation_pnl_met = True
         
         # 3. First: Move to break-even once threshold met
@@ -2450,24 +2698,9 @@ class DayTradingManager:
         except (TypeError, ValueError):
             return default
 
-    def _resolve_multilayer_weights(
-        self,
-        session: TradingSession,
-        ml_engine: MultiLayerDecision,
-        flow_metrics: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Compute per-bar effective multi-layer weights without sticky mutation."""
-        base_pattern_weight = float(
-            session.multilayer_base_pattern_weight
-            if session.multilayer_base_pattern_weight is not None
-            else ml_engine.pattern_weight
-        )
-        base_strategy_weight = float(
-            session.multilayer_base_strategy_weight
-            if session.multilayer_base_strategy_weight is not None
-            else ml_engine.strategy_weight
-        )
-
+    def _resolve_evidence_weight_context(self, flow_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute lightweight strategy-weight context for diagnostics."""
+        base_strategy_weight = 0.95
         bars_with_l2 = max(0.0, float(flow_metrics.get("bars_with_l2", 0.0) or 0.0))
         lookback_bars = max(1.0, float(flow_metrics.get("lookback_bars", 1.0) or 1.0))
         l2_coverage_ratio = min(1.0, bars_with_l2 / lookback_bars)
@@ -2478,10 +2711,8 @@ class DayTradingManager:
         effective_strategy_weight = 1.0 if l2_quality_ok else base_strategy_weight
 
         return {
-            "pattern_weight": base_pattern_weight,
             "strategy_weight": float(effective_strategy_weight),
             "strategy_weight_source": strategy_weight_source,
-            "base_pattern_weight": base_pattern_weight,
             "base_strategy_weight": base_strategy_weight,
             "l2_has_coverage": l2_has_coverage,
             "l2_quality_ok": l2_quality_ok,
@@ -2489,6 +2720,244 @@ class DayTradingManager:
             "l2_bars_with_coverage": bars_with_l2,
             "l2_lookback_bars": lookback_bars,
         }
+
+    @staticmethod
+    def _is_midday_window(bar_time: time) -> bool:
+        """Return True for lower-conviction midday window."""
+        midday_start = time(10, 30)
+        midday_end = time(14, 0)
+        return midday_start <= bar_time < midday_end
+
+    def _required_confirming_sources(self, session: TradingSession, bar_time: time) -> int:
+        """
+        Dynamic confirmation guard to reduce low-quality trades in noisy states.
+        """
+        required = 2
+        macro_regime = session.detected_regime or Regime.MIXED
+        micro_regime = (session.micro_regime or "MIXED").upper()
+
+        if macro_regime in {Regime.CHOPPY, Regime.MIXED} or micro_regime in {"CHOPPY", "MIXED"}:
+            required = 3
+
+        if self._is_midday_window(bar_time):
+            required += 1
+
+        return required
+
+    def _is_mu_choppy_blocked(self, session: TradingSession, regime: Regime) -> bool:
+        """Hard block MU entries during CHOPPY conditions."""
+        if session.ticker.upper() != "MU":
+            return False
+
+        micro_regime = (session.micro_regime or "MIXED").upper()
+        return regime == Regime.CHOPPY or micro_regime == "CHOPPY"
+
+    @staticmethod
+    def _signal_direction(signal: Signal) -> Optional[str]:
+        if signal.signal_type == SignalType.BUY:
+            return "bullish"
+        if signal.signal_type == SignalType.SELL:
+            return "bearish"
+        return None
+
+    def _aligned_evidence_source_keys(self, signal: Signal) -> List[str]:
+        """List unique aligned evidence source keys from signal metadata."""
+        if not isinstance(signal.metadata, dict):
+            return []
+
+        evidence = signal.metadata.get("evidence_sources")
+        if not isinstance(evidence, list):
+            return []
+
+        direction = self._signal_direction(signal)
+        if direction is None:
+            return []
+
+        aligned = set()
+        for source in evidence:
+            if not isinstance(source, dict):
+                continue
+            source_dir = str(source.get("direction", "")).strip().lower()
+            if source_dir != direction:
+                continue
+            source_type = str(source.get("type", "")).strip().lower()
+            source_name = str(source.get("name", "")).strip().lower()
+            if not source_type or not source_name:
+                continue
+            aligned.add(f"{source_type}:{source_name}")
+
+        return sorted(aligned)
+
+    def _confirming_source_stats(self, signal: Signal) -> Dict[str, Any]:
+        """
+        Resolve confirming-source count from ensemble metadata with evidence fallback.
+        """
+        aligned_keys = self._aligned_evidence_source_keys(signal)
+        aligned_count = len(aligned_keys)
+
+        confirming_count = aligned_count
+        count_source = "aligned_evidence_sources"
+
+        if isinstance(signal.metadata, dict):
+            layer_scores = signal.metadata.get("layer_scores")
+            if isinstance(layer_scores, dict):
+                maybe_count = self._safe_float(layer_scores.get("confirming_sources"), None)
+                if maybe_count is not None:
+                    confirming_count = max(0, int(round(maybe_count)))
+                    count_source = "ensemble_layer_scores"
+
+        return {
+            "confirming_sources": confirming_count,
+            "aligned_evidence_sources": aligned_count,
+            "aligned_source_keys": aligned_keys,
+            "count_source": count_source,
+        }
+
+    @staticmethod
+    def _normalize_source_key(value: Any) -> Optional[str]:
+        """Normalize a source key to `type:name` lower-case form."""
+        if not isinstance(value, str):
+            return None
+        raw = value.strip().lower()
+        if not raw or ":" not in raw:
+            return None
+        source_type, source_name = raw.split(":", 1)
+        source_type = source_type.strip()
+        source_name = source_name.strip()
+        if not source_type or not source_name:
+            return None
+        return f"{source_type}:{source_name}"
+
+    def _extract_confirming_source_keys_from_metadata(
+        self,
+        signal_metadata: Dict[str, Any],
+        side: str,
+        strategy_name: str,
+    ) -> List[str]:
+        """
+        Extract aligned evidence source keys from stored signal metadata.
+
+        Returns only non-strategy sources to avoid double-counting strategy
+        outcomes (strategy source is always updated separately).
+        """
+        if not isinstance(signal_metadata, dict):
+            return []
+
+        candidates: List[str] = []
+
+        layer_scores = signal_metadata.get("layer_scores")
+        if isinstance(layer_scores, dict):
+            raw_keys = layer_scores.get("aligned_source_keys")
+            if isinstance(raw_keys, list):
+                for raw_key in raw_keys:
+                    normalized = self._normalize_source_key(raw_key)
+                    if normalized:
+                        candidates.append(normalized)
+
+        if not candidates:
+            evidence = signal_metadata.get("evidence_sources")
+            if isinstance(evidence, list):
+                direction = "bullish" if side == "long" else "bearish" if side == "short" else None
+                for source in evidence:
+                    if not isinstance(source, dict):
+                        continue
+                    if direction:
+                        source_dir = str(source.get("direction", "")).strip().lower()
+                        if source_dir != direction:
+                            continue
+                    source_type = str(source.get("type", "")).strip().lower()
+                    source_name = str(source.get("name", "")).strip().lower()
+                    normalized = self._normalize_source_key(f"{source_type}:{source_name}")
+                    if normalized:
+                        candidates.append(normalized)
+
+        primary_strategy_key = self._normalize_source_key(
+            f"strategy:{self._canonical_strategy_key(strategy_name)}"
+        )
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if primary_strategy_key and candidate == primary_strategy_key:
+                continue
+            if candidate.startswith("strategy:"):
+                continue
+            deduped.append(candidate)
+
+        return deduped
+
+    @staticmethod
+    def _extract_raw_confidence_from_metadata(signal_metadata: Dict[str, Any]) -> float:
+        """Resolve best available confidence proxy from stored signal metadata."""
+        if not isinstance(signal_metadata, dict):
+            return 50.0
+
+        confidence = DayTradingManager._safe_float(signal_metadata.get("confidence"), None)
+        if confidence is not None:
+            return max(1.0, min(100.0, float(confidence)))
+
+        adjustment = signal_metadata.get("confidence_adjustment")
+        if isinstance(adjustment, dict):
+            adjusted = DayTradingManager._safe_float(adjustment.get("adjusted_confidence"), None)
+            if adjusted is not None:
+                return max(1.0, min(100.0, float(adjusted)))
+
+        layer_scores = signal_metadata.get("layer_scores")
+        if isinstance(layer_scores, dict):
+            strategy_score = DayTradingManager._safe_float(layer_scores.get("strategy_score"), None)
+            if strategy_score is not None:
+                return max(1.0, min(100.0, float(strategy_score)))
+
+        return 50.0
+
+    def _passes_momentum_flow_delta_confirmation(self, signal: Signal) -> tuple[bool, Dict[str, Any]]:
+        """
+        Require MomentumFlow entries to include delta-divergence co-confirmation.
+        """
+        strategy_key = self._canonical_strategy_key(signal.strategy_name or "")
+        metrics: Dict[str, Any] = {
+            "enabled": strategy_key == "momentum_flow",
+            "strategy_key": strategy_key,
+            "required_source": "l2_flow:delta_divergence",
+            "passed": True,
+        }
+        if strategy_key != "momentum_flow":
+            return True, metrics
+
+        aligned_keys = self._aligned_evidence_source_keys(signal)
+        has_aligned_delta = "l2_flow:delta_divergence" in aligned_keys
+
+        source_weights: Dict[str, Any] = {}
+        if isinstance(signal.metadata, dict):
+            layer_scores = signal.metadata.get("layer_scores")
+            if isinstance(layer_scores, dict) and isinstance(layer_scores.get("source_weights"), dict):
+                source_weights = layer_scores.get("source_weights") or {}
+            elif (
+                isinstance(signal.metadata.get("ensemble"), dict)
+                and isinstance(signal.metadata["ensemble"].get("source_weights"), dict)
+            ):
+                source_weights = signal.metadata["ensemble"].get("source_weights") or {}
+
+        delta_weight = 0.0
+        if source_weights:
+            delta_weight = float(self._safe_float(source_weights.get("l2_flow:delta_divergence"), 0.0) or 0.0)
+
+        has_weighted_delta = delta_weight > 0.0 if source_weights else has_aligned_delta
+        passed = has_aligned_delta and has_weighted_delta
+
+        metrics.update({
+            "passed": passed,
+            "aligned_source_keys": aligned_keys,
+            "has_aligned_delta_divergence": has_aligned_delta,
+            "has_weighted_delta_divergence": has_weighted_delta,
+            "delta_divergence_weight": round(delta_weight, 4),
+        })
+
+        if not passed:
+            metrics["reason"] = "momentum_flow_missing_delta_divergence"
+        return passed, metrics
 
     @staticmethod
     def _time_of_day_threshold_boost(bar_time: time) -> float:
@@ -2501,11 +2970,8 @@ class DayTradingManager:
 
         Returns 0 outside the midday window (open + close are unchanged).
         """
-        # Midday dead-zone: 10:30 .. 14:00 ET
-        midday_start = time(10, 30)
-        midday_end = time(14, 0)
-        if midday_start <= bar_time < midday_end:
-            return 5.0
+        if DayTradingManager._is_midday_window(bar_time):
+            return 7.0
         return 0.0
 
     def _build_position_closed_payload(
@@ -2926,6 +3392,7 @@ class DayTradingManager:
         risk_budget = capital * (max(0.1, float(session.risk_per_trade_pct)) / 100.0)
         flow_confidence_factor = max(0.5, min(1.5, float(signal.confidence) / 80.0))
         risk_budget *= flow_confidence_factor
+        risk_budget *= self._agreement_risk_multiplier(self._extract_confirming_sources(signal))
         max_notional = capital * (max(1.0, float(session.max_position_notional_pct)) / 100.0)
         size_by_notional = max_notional / entry_price
 
@@ -2958,6 +3425,110 @@ class DayTradingManager:
         if desired_size < min_size and size_by_notional >= min_size:
             desired_size = min_size
         return round(max(0.0, desired_size), 4)
+
+    @staticmethod
+    def _extract_confirming_sources(signal: Signal) -> Optional[int]:
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        if not isinstance(metadata, dict):
+            return None
+
+        layer_scores = metadata.get("layer_scores")
+        if isinstance(layer_scores, dict):
+            raw = layer_scores.get("confirming_sources")
+            try:
+                value = int(raw)
+                return value if value > 0 else None
+            except (TypeError, ValueError):
+                pass
+
+        ensemble = metadata.get("ensemble")
+        if isinstance(ensemble, dict):
+            raw = ensemble.get("confirming_sources")
+            try:
+                value = int(raw)
+                return value if value > 0 else None
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    @staticmethod
+    def _agreement_risk_multiplier(confirming_sources: Optional[int]) -> float:
+        """
+        Conservative risk scaling by source agreement.
+
+        This is intentionally simple and monotonic to avoid overfitting:
+        fewer independent confirmations -> smaller size.
+        """
+        if confirming_sources is None:
+            return 1.0
+        if confirming_sources <= 1:
+            return 0.55
+        if confirming_sources == 2:
+            return 0.75
+        return 1.0
+
+    @staticmethod
+    def _trailing_multiplier(confirming_sources: Optional[int]) -> float:
+        """
+        Monotonic widening for higher-conviction entries.
+
+        Broader trailing for stronger evidence helps avoid cutting winners too
+        early while keeping weakly-confirmed trades tighter.
+        """
+        if confirming_sources is None:
+            return 1.0
+        if confirming_sources >= 5:
+            return 1.30
+        if confirming_sources == 4:
+            return 1.20
+        if confirming_sources == 3:
+            return 1.10
+        return 1.0
+
+    def _effective_trailing_stop_pct(self, session: TradingSession, signal: Signal) -> float:
+        """Compute effective trailing distance for the active position."""
+        base_trailing = float(signal.trailing_stop_pct or 0.8)
+        confirming_sources = self._extract_confirming_sources(signal)
+        trailing = base_trailing * self._trailing_multiplier(confirming_sources)
+
+        # Small regime adjustment: allow trend trades a bit more room.
+        if session.detected_regime == Regime.TRENDING:
+            trailing *= 1.05
+
+        return max(0.4, min(2.5, trailing))
+
+    @staticmethod
+    def _fixed_stop_price(entry_price: float, side: str, stop_loss_pct: float) -> float:
+        stop_loss_pct = max(0.0, float(stop_loss_pct))
+        if stop_loss_pct <= 0 or entry_price <= 0:
+            return 0.0
+        if side == "long":
+            return entry_price * (1 - (stop_loss_pct / 100.0))
+        return entry_price * (1 + (stop_loss_pct / 100.0))
+
+    def _resolve_stop_loss_for_entry(
+        self,
+        session: TradingSession,
+        signal: Signal,
+        entry_price: float,
+        side: str,
+    ) -> float:
+        mode = self._normalize_stop_loss_mode(session.stop_loss_mode)
+        fixed_pct = max(0.0, float(session.fixed_stop_loss_pct))
+        strategy_stop = float(signal.stop_loss) if signal.stop_loss else 0.0
+        if mode == "strategy" or fixed_pct <= 0.0 or entry_price <= 0:
+            return strategy_stop
+
+        fixed_stop = self._fixed_stop_price(entry_price, side, fixed_pct)
+        if fixed_stop <= 0.0:
+            return strategy_stop
+        if strategy_stop <= 0.0 or mode == "fixed":
+            return fixed_stop
+
+        # capped mode: keep strategy stop only if it is tighter than fixed stop.
+        if side == "long":
+            return max(strategy_stop, fixed_stop)
+        return min(strategy_stop, fixed_stop)
 
     def _simulate_entry_fill(
         self,
@@ -3233,6 +3804,16 @@ class DayTradingManager:
         """Open a new position from signal."""
         side = 'long' if signal.signal_type == SignalType.BUY else 'short'
         fill_price = float(entry_price if entry_price is not None else signal.price)
+        confirming_sources = self._extract_confirming_sources(signal)
+        base_trailing_stop_pct = float(signal.trailing_stop_pct or 0.8)
+        effective_trailing_stop_pct = self._effective_trailing_stop_pct(session, signal)
+        effective_stop_loss = self._resolve_stop_loss_for_entry(
+            session=session,
+            signal=signal,
+            entry_price=fill_price,
+            side=side,
+        )
+        effective_take_profit = float(signal.take_profit) if signal.take_profit else 0.0
         fill_time = entry_time or signal.timestamp
         desired_size = self._calculate_position_size(session, signal, fill_price)
         size, fill_ratio = self._simulate_entry_fill(
@@ -3247,8 +3828,8 @@ class DayTradingManager:
             entry_time=fill_time,
             side=side,
             size=size,
-            stop_loss=signal.stop_loss or 0,
-            take_profit=signal.take_profit or 0,
+            stop_loss=effective_stop_loss,
+            take_profit=effective_take_profit,
             trailing_stop_active=signal.trailing_stop,
             highest_price=fill_price if side == 'long' else 0,
             lowest_price=fill_price if side == 'short' else float('inf'),
@@ -3267,11 +3848,22 @@ class DayTradingManager:
             position.signal_metadata = json.loads(json.dumps(signal_metadata, default=str))
         except Exception:
             position.signal_metadata = dict(signal_metadata)
+        risk_controls = {
+            "stop_loss_mode": self._normalize_stop_loss_mode(session.stop_loss_mode),
+            "fixed_stop_loss_pct": round(max(0.0, float(session.fixed_stop_loss_pct)), 6),
+            "effective_stop_loss": round(float(effective_stop_loss), 6) if effective_stop_loss > 0 else 0.0,
+            "strategy_stop_loss": round(float(signal.stop_loss), 6) if signal.stop_loss else 0.0,
+            "confirming_sources": confirming_sources,
+            "base_trailing_stop_pct": round(base_trailing_stop_pct, 6),
+            "effective_trailing_stop_pct": round(effective_trailing_stop_pct, 6),
+        }
+        if isinstance(position.signal_metadata, dict):
+            position.signal_metadata["risk_controls"] = risk_controls
         if session.enable_partial_take_profit and position.stop_loss > 0:
             position.partial_take_profit_price = self._partial_take_profit_price(session, position)
         
         session.active_position = position
-        session.trailing_stop_pct = signal.trailing_stop_pct or 0.8
+        session.trailing_stop_pct = effective_trailing_stop_pct
         
         return position
     
@@ -3308,7 +3900,12 @@ class DayTradingManager:
                       if stop_dist > 0 else 0.0)
             signal_md = (pos.signal_metadata
                          if isinstance(pos.signal_metadata, dict) else {})
-            raw_conf = float(signal_md.get('confidence', 50.0))
+            raw_conf = self._extract_raw_confidence_from_metadata(signal_md)
+            confirming_source_keys = self._extract_confirming_source_keys_from_metadata(
+                signal_metadata=signal_md,
+                side=pos.side,
+                strategy_name=pos.strategy_name,
+            )
 
             orch.record_trade_outcome(
                 strategy=pos.strategy_name,
@@ -3317,6 +3914,7 @@ class DayTradingManager:
                 was_profitable=was_profitable,
                 pnl_r=pnl_r,
                 bar_index=len(session.bars) - 1,
+                confirming_sources=confirming_source_keys,
             )
 
         return trade

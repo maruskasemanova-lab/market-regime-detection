@@ -3,7 +3,7 @@ Pydantic API models shared by strategy API endpoints.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -49,6 +49,10 @@ class BarInput(BaseModel):
     l2_iceberg_buy_count: Optional[float] = None
     l2_iceberg_sell_count: Optional[float] = None
     l2_iceberg_bias: Optional[float] = None
+    # Optional 1-second top-of-book snapshots for intrabar execution replay.
+    # Each frame should include:
+    #   s: second-in-minute [0..59], bid: top bid px, ask: top ask px
+    intrabar_quotes_1s: Optional[List[Dict[str, float]]] = None
     # Cross-asset reference bar (optional, e.g. QQQ)
     ref_ticker: Optional[str] = None
     ref_open: Optional[float] = None
@@ -86,19 +90,5 @@ class TradingConfig(BaseModel):
     adverse_flow_exit_enabled: bool = True
     adverse_flow_threshold: float = 0.12
     adverse_flow_min_hold_bars: int = 3
-
-
-class MultiLayerConfig(BaseModel):
-    """Configuration for the multi-layer decision engine."""
-
-    pattern_weight: Optional[float] = None
-    strategy_weight: Optional[float] = None
-    threshold: Optional[float] = None
-    strategy_only_threshold: Optional[float] = None
-    require_pattern: Optional[bool] = None
-    # Candlestick pattern detector settings
-    body_doji_pct: Optional[float] = None
-    wick_ratio_hammer: Optional[float] = None
-    engulfing_min_body_pct: Optional[float] = None
-    volume_confirm_ratio: Optional[float] = None
-    vwap_proximity_pct: Optional[float] = None
+    stop_loss_mode: str = "strategy"
+    fixed_stop_loss_pct: float = 0.0

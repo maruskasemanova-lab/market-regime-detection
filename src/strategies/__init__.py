@@ -14,7 +14,6 @@ from .gap_liquidity import GapLiquidityStrategy
 from .absorption_reversal import AbsorptionReversalStrategy
 from .momentum_flow import MomentumFlowStrategy
 from .exhaustion_fade import ExhaustionFadeStrategy
-from .candlestick_patterns import CandlestickPatternDetector, DetectedPattern, PatternDirection
 
 __all__ = [
     'BaseStrategy',
@@ -32,7 +31,4 @@ __all__ = [
     'AbsorptionReversalStrategy',
     'MomentumFlowStrategy',
     'ExhaustionFadeStrategy',
-    'CandlestickPatternDetector',
-    'DetectedPattern',
-    'PatternDirection',
 ]

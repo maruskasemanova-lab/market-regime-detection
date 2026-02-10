@@ -239,7 +239,7 @@ class AdaptiveWeightCombiner:
         
         execute = (
             margin >= required_margin
-            and confirming >= 1  # At least 1 source required
+            and confirming >= self._min_confirming
         )
 
         reasons = []
@@ -248,8 +248,10 @@ class AdaptiveWeightCombiner:
                 f"margin {margin:.1f} < required {required_margin:.1f} "
                 f"(score {combined_score:.1f}, thresh {threshold:.1f})"
             )
-        if confirming < 1:
-            reasons.append(f"no confirming sources")
+        if confirming < self._min_confirming:
+            reasons.append(
+                f"confirming sources {confirming} < required {self._min_confirming}"
+            )
         if execute:
             reasons.append(
                 f"margin {margin:.1f} >= {required_margin:.1f}, "

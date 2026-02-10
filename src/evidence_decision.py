@@ -3,7 +3,7 @@ Evidence-Based Decision Engine.
 
 Evolves MultiLayerDecision from pattern-gated to multi-evidence approach.
 No single evidence source can block entry alone; minimum 2 confirming
-sources required. Patterns become one evidence source among many.
+sources required.
 
 Uses:
   - FeatureVector (normalized indicators)
@@ -29,11 +29,6 @@ from .ensemble_combiner import (
 from .edge_monitor import EdgeMonitor, EdgeStatus, RecommendedAction
 from .cross_asset import CrossAssetState
 from .multi_layer_decision import DecisionResult
-from .strategies.candlestick_patterns import (
-    CandlestickPatternDetector,
-    DetectedPattern,
-    PatternDirection,
-)
 from .strategies.base_strategy import BaseStrategy, Signal, SignalType, Regime
 
 logger = logging.getLogger(__name__)
@@ -42,7 +37,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EvidenceSource:
     """A single piece of evidence for/against a trade."""
-    source_type: str       # 'pattern', 'strategy', 'feature', 'l2_flow', 'cross_asset', 'regime'
+    source_type: str       # 'strategy', 'feature', 'l2_flow', 'cross_asset', 'regime'
     source_name: str       # e.g. 'hammer', 'momentum_flow', 'rsi_extreme'
     direction: str         # 'bullish', 'bearish', 'neutral'
     strength: float        # 0-100 raw strength
@@ -55,12 +50,11 @@ class EvidenceDecisionEngine:
     Multi-evidence decision engine.
 
     Evidence sources:
-      1. Candlestick patterns (existing 13 patterns)
-      2. Strategy signals (existing 10 strategies)
-      3. Feature signals (normalized indicator extremes)
-      4. L2 flow signals (order flow alignment)
-      5. Cross-asset signals (index/sector context)
-      6. Regime alignment (regime probability support)
+      1. Strategy signals (existing 10 strategies)
+      2. Feature signals (normalized indicator extremes)
+      3. L2 flow signals (order flow alignment)
+      4. Cross-asset signals (index/sector context)
+      5. Regime alignment (regime probability support)
 
     Decision logic:
       - Collect evidence from all sources
@@ -68,6 +62,7 @@ class EvidenceDecisionEngine:
       - Combine with adaptive weights
       - Require minimum 2 confirming sources
       - Apply dynamic threshold
+      - Execute only when an aligned strategy signal exists
     """
 
     def __init__(
@@ -82,7 +77,6 @@ class EvidenceDecisionEngine:
         strategy_weight: float = 0.6,
         strategy_only_threshold: float = 0.0,
     ):
-        self.pattern_detector = CandlestickPatternDetector()
         self.calibrator = calibrator or ConfidenceCalibrator()
         self.combiner = combiner or AdaptiveWeightCombiner(
             min_confirming_sources=min_confirming_sources,
@@ -91,9 +85,9 @@ class EvidenceDecisionEngine:
         self.edge_monitor = edge_monitor or EdgeMonitor()
         self._min_confirming = min_confirming_sources
         self._base_threshold = base_threshold
-        # Legacy weights for DecisionResult compatibility
-        self._pattern_weight = pattern_weight
-        self._strategy_weight = strategy_weight
+        # Legacy fields kept for schema compatibility.
+        self._pattern_weight = 0.0
+        self._strategy_weight = 1.0
         self._strategy_only_threshold = strategy_only_threshold
 
     def evaluate(
@@ -129,64 +123,9 @@ class EvidenceDecisionEngine:
         evidence_sources: List[EvidenceSource] = []
         calibrated_signals: List[CalibratedSignal] = []
 
-        # ── Evidence 1: Candlestick Patterns ──────────────────────────
-        patterns = self.pattern_detector.detect(ohlcv, indicators)
-        result.patterns = patterns
+        result.patterns = []
 
-        pattern_direction = None
-        pattern_score = 0.0
-
-        if patterns:
-            bullish_p = [p for p in patterns if p.direction == PatternDirection.BULLISH]
-            bearish_p = [p for p in patterns if p.direction == PatternDirection.BEARISH]
-
-            if bullish_p or bearish_p:
-                bull_avg = (sum(p.strength for p in bullish_p) / len(bullish_p)) if bullish_p else 0
-                bear_avg = (sum(p.strength for p in bearish_p) / len(bearish_p)) if bearish_p else 0
-
-                if bull_avg >= bear_avg and bullish_p:
-                    pattern_direction = 'bullish'
-                    pattern_score = max(p.strength for p in bullish_p)
-                    best_pattern = max(bullish_p, key=lambda p: p.strength)
-                elif bearish_p:
-                    pattern_direction = 'bearish'
-                    pattern_score = max(p.strength for p in bearish_p)
-                    best_pattern = max(bearish_p, key=lambda p: p.strength)
-                else:
-                    best_pattern = None
-
-                if best_pattern:
-                    result.primary_pattern = best_pattern.name
-                    result.pattern_score = pattern_score
-
-                    # DISABLED: Candlestick patterns are not evidence-based
-                    # They add noise without proven edge. Keeping pattern_score for
-                    # logging/debugging but not as a decision source.
-                    #
-                    # cal_conf = self.calibrator.calibrate(
-                    #     f"pattern:{best_pattern.name}",
-                    #     pattern_score,
-                    #     regime_state.primary if regime_state else regime.value,
-                    # )
-                    #
-                    # evidence_sources.append(EvidenceSource(
-                    #     source_type='pattern',
-                    #     source_name=best_pattern.name,
-                    #     direction=pattern_direction,
-                    #     strength=pattern_score,
-                    #     calibrated=cal_conf,
-                    #     reasoning=f"Pattern {best_pattern.name} strength={pattern_score:.0f}",
-                    # ))
-                    #
-                    # calibrated_signals.append(CalibratedSignal(
-                    #     source_type='pattern',
-                    #     source_name=best_pattern.name,
-                    #     direction=pattern_direction,
-                    #     raw_confidence=pattern_score,
-                    #     calibrated_confidence=cal_conf,
-                    # ))
-
-        # ── Evidence 2: Strategy Signals ──────────────────────────────
+        # ── Evidence 1: Strategy Signals ──────────────────────────────
         confirming_signals: List[Signal] = []
 
         if generate_signal_fn is not None:
@@ -249,7 +188,7 @@ class EvidenceDecisionEngine:
         if confirming_signals:
             result.strategy_score = max(s.confidence for s in confirming_signals)
 
-        # ── Evidence 3: Feature-Based Signals ─────────────────────────
+        # ── Evidence 2: Feature-Based Signals ─────────────────────────
         if feature_vector is not None:
             feat_evidence = self._extract_feature_evidence(feature_vector)
             for ev in feat_evidence:
@@ -262,7 +201,7 @@ class EvidenceDecisionEngine:
                     calibrated_confidence=ev.calibrated,
                 ))
 
-        # ── Evidence 4: L2 Flow Evidence ──────────────────────────────
+        # ── Evidence 3: L2 Flow Evidence ──────────────────────────────
         if feature_vector is not None and feature_vector.l2_has_coverage:
             l2_evidence = self._extract_l2_evidence(feature_vector)
             for ev in l2_evidence:
@@ -275,7 +214,7 @@ class EvidenceDecisionEngine:
                     calibrated_confidence=ev.calibrated,
                 ))
 
-        # ── Evidence 5: Cross-Asset Evidence ──────────────────────────
+        # ── Evidence 4: Cross-Asset Evidence ──────────────────────────
         if cross_asset_state is not None and cross_asset_state.index_available:
             ca_evidence = self._extract_cross_asset_evidence(cross_asset_state)
             if ca_evidence:
@@ -288,7 +227,7 @@ class EvidenceDecisionEngine:
                     calibrated_confidence=ca_evidence.calibrated,
                 ))
 
-        # ── Evidence 6: Regime Alignment ──────────────────────────────
+        # ── Evidence 5: Regime Alignment ──────────────────────────────
         if regime_state is not None:
             regime_evidence = self._extract_regime_evidence(regime_state)
             if regime_evidence:
@@ -341,13 +280,13 @@ class EvidenceDecisionEngine:
             f"is_trans={is_trans}, te={te_str})"
         )
 
-        # Pattern confirmation flag (for legacy compatibility)
-        result.pattern_confirmation = any(
-            e.source_type == 'pattern' and e.calibrated > 0.45
-            for e in evidence_sources
-        )
+        # Pattern-related fields are intentionally disabled in evidence mode.
+        result.pattern_confirmation = False
+        result.primary_pattern = None
+        result.pattern_score = 0.0
 
         # ── Execute Decision ──────────────────────────────────────────
+        no_aligned_strategy_signal = False
         if ensemble.execute:
             result.execute = True
             # Pick the best strategy signal for trade execution
@@ -359,7 +298,8 @@ class EvidenceDecisionEngine:
 
             if strategy_signals:
                 best_signal = max(strategy_signals, key=lambda s: s.confidence)
-                best_signal.metadata['patterns'] = [p.to_dict() for p in patterns]
+                if isinstance(best_signal.metadata, dict):
+                    best_signal.metadata.pop('patterns', None)
                 best_signal.metadata['layer_scores'] = self._build_layer_scores(
                     result, ensemble,
                 )
@@ -374,40 +314,11 @@ class EvidenceDecisionEngine:
                     f"[EV] {ensemble.reasoning} | {best_signal.reasoning}"
                 )
                 result.signal = best_signal
-            elif pattern_direction and patterns:
-                # Pattern-only trade (fallback)
-                best_pattern = max(patterns, key=lambda p: p.strength)
-                atr = indicators.get('atr')
-                atr_val = (atr[-1] if isinstance(atr, list) and atr
-                           else (atr if isinstance(atr, (int, float)) and atr
-                                 else current_price * 0.005))
-
-                if ensemble.direction == 'bullish':
-                    sig_type = SignalType.BUY
-                    stop_loss = current_price - atr_val * 2
-                    take_profit = current_price + atr_val * 3
-                else:
-                    sig_type = SignalType.SELL
-                    stop_loss = current_price + atr_val * 2
-                    take_profit = current_price - atr_val * 3
-
-                result.signal = Signal(
-                    strategy_name=f"Evidence:{best_pattern.name}",
-                    signal_type=sig_type,
-                    price=current_price,
-                    timestamp=timestamp,
-                    confidence=ensemble.combined_score,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    trailing_stop=True,
-                    trailing_stop_pct=0.8,
-                    reasoning=f"[EV] {ensemble.reasoning}",
-                    metadata={
-                        'patterns': [p.to_dict() for p in patterns],
-                        'layer_scores': self._build_layer_scores(result, ensemble),
-                        'ensemble': ensemble.to_dict(),
-                    },
-                )
+            else:
+                # Evidence by itself cannot open positions; execution needs a
+                # strategy-produced signal aligned with ensemble direction.
+                result.execute = False
+                no_aligned_strategy_signal = True
 
         # ── Reasoning ─────────────────────────────────────────────────
         evidence_summary = ", ".join(
@@ -421,6 +332,8 @@ class EvidenceDecisionEngine:
             f"confirming={ensemble.confirming_sources}/{ensemble.total_sources} | "
             f"{'EXECUTE' if result.execute else 'SKIP'}"
         )
+        if no_aligned_strategy_signal:
+            result.reasoning += " | no aligned strategy signal"
 
         return result
 
@@ -607,7 +520,7 @@ class EvidenceDecisionEngine:
             'threshold_used_reason': result.threshold_used_reason,
             'pattern_confirmation': result.pattern_confirmation,
             'primary_pattern': result.primary_pattern,
-            'pattern_direction': result.direction,
+            'pattern_direction': None,
             'pattern_weight': self._pattern_weight,
             'strategy_weight': self._strategy_weight,
             # New fields
