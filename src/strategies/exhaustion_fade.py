@@ -28,6 +28,7 @@ class ExhaustionFadeStrategy(BaseStrategy):
             name="ExhaustionFade",
             regimes=[Regime.TRENDING, Regime.CHOPPY, Regime.MIXED],
         )
+        self._uses_l2_internally = True
         self.min_absorption_rate = min_absorption_rate
         self.min_divergence = min_divergence
         self.min_delta_zscore = min_delta_zscore

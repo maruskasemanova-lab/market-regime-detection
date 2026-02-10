@@ -3766,7 +3766,22 @@ class DayTradingManager:
         metrics = {"signed_aggression": 0.0, "directional_consistency": 0.0, "book_pressure_avg": 0.0}
         if not session.adverse_flow_exit_enabled:
             return False, metrics
-        if self._bars_held(pos, current_bar_index) < int(session.adverse_flow_min_hold_bars):
+
+        bars_held = self._bars_held(pos, current_bar_index)
+
+        # Grace period: profitable positions get higher minimum hold
+        # to let winners breathe through normal L2 oscillation
+        current_price = session.bars[-1].close if session.bars else pos.entry_price
+        if pos.side == "long":
+            unrealized_pnl = current_price - pos.entry_price
+        else:
+            unrealized_pnl = pos.entry_price - current_price
+
+        effective_min_hold = int(session.adverse_flow_min_hold_bars)
+        if unrealized_pnl > 0:
+            effective_min_hold = max(effective_min_hold, 8)
+
+        if bars_held < effective_min_hold:
             return False, metrics
 
         flow = self._calculate_order_flow_metrics(session.bars, lookback=min(12, len(session.bars)))
@@ -3777,19 +3792,34 @@ class DayTradingManager:
         consistency = float(flow.get("directional_consistency", 0.0) or 0.0)
         book_pressure_avg = float(flow.get("book_pressure_avg", 0.0) or 0.0)
         threshold = max(0.02, float(session.adverse_flow_threshold))
+
+        # Tunable consistency & book pressure thresholds (default to legacy values)
+        ticker_cfg = self.ticker_params.get(session.ticker.upper(), {})
+        consistency_thr = float(ticker_cfg.get("adverse_flow_consistency_threshold", 0.45))
+        book_pressure_thr = float(ticker_cfg.get("adverse_book_pressure_threshold", 0.15))
+
         metrics = {
             "signed_aggression": signed,
             "directional_consistency": consistency,
             "book_pressure_avg": book_pressure_avg,
+            "threshold": threshold,
+            "consistency_threshold": consistency_thr,
+            "book_pressure_threshold": book_pressure_thr,
+            "unrealized_pnl": unrealized_pnl,
+            "effective_min_hold": effective_min_hold,
+            "bars_held": bars_held,
         }
 
         if pos.side == "long":
-            adverse_flow = signed <= -threshold and consistency >= 0.45
-            adverse_book = book_pressure_avg <= -0.15
-            return (adverse_flow or adverse_book), metrics
-        adverse_flow = signed >= threshold and consistency >= 0.45
-        adverse_book = book_pressure_avg >= 0.15
-        return (adverse_flow or adverse_book), metrics
+            adverse_flow = signed <= -threshold and consistency >= consistency_thr
+            adverse_book = book_pressure_avg <= -book_pressure_thr
+            # Emergency: book pressure alone at 2× threshold (extreme one-sided book)
+            strong_book = book_pressure_avg <= -book_pressure_thr * 2.0
+            return (adverse_flow and adverse_book) or strong_book, metrics
+        adverse_flow = signed >= threshold and consistency >= consistency_thr
+        adverse_book = book_pressure_avg >= book_pressure_thr
+        strong_book = book_pressure_avg >= book_pressure_thr * 2.0
+        return (adverse_flow and adverse_book) or strong_book, metrics
     
     def _open_position(
         self,

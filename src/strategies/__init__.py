@@ -14,6 +14,7 @@ from .gap_liquidity import GapLiquidityStrategy
 from .absorption_reversal import AbsorptionReversalStrategy
 from .momentum_flow import MomentumFlowStrategy
 from .exhaustion_fade import ExhaustionFadeStrategy
+from .iceberg_defense import IcebergDefenseStrategy
 
 __all__ = [
     'BaseStrategy',
@@ -31,4 +32,5 @@ __all__ = [
     'AbsorptionReversalStrategy',
     'MomentumFlowStrategy',
     'ExhaustionFadeStrategy',
+    'IcebergDefenseStrategy',
 ]

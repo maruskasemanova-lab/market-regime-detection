@@ -16,6 +16,7 @@ from .strategies.gap_liquidity import GapLiquidityStrategy
 from .strategies.absorption_reversal import AbsorptionReversalStrategy
 from .strategies.momentum_flow import MomentumFlowStrategy
 from .strategies.exhaustion_fade import ExhaustionFadeStrategy
+from .strategies.iceberg_defense import IcebergDefenseStrategy
 
 
 def build_strategy_registry() -> Dict[str, BaseStrategy]:
@@ -31,5 +32,6 @@ def build_strategy_registry() -> Dict[str, BaseStrategy]:
         "absorption_reversal": AbsorptionReversalStrategy(),
         "momentum_flow": MomentumFlowStrategy(),
         "exhaustion_fade": ExhaustionFadeStrategy(),
+        "iceberg_defense": IcebergDefenseStrategy(),
     }
 

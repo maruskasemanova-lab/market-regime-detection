@@ -29,6 +29,7 @@ class AbsorptionReversalStrategy(BaseStrategy):
             name="AbsorptionReversal",
             regimes=[Regime.TRENDING, Regime.CHOPPY, Regime.MIXED],
         )
+        self._uses_l2_internally = True
         self.min_absorption_rate = min_absorption_rate
         self.min_divergence = min_divergence
         self.min_signed_aggression = min_signed_aggression

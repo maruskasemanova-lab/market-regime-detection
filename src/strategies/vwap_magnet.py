@@ -275,6 +275,7 @@ class VWAPMagnetStrategy(BaseStrategy):
                 )
         
         if signal:
+            signal = self.apply_l2_flow_boost(signal, indicators)
             self.add_signal(signal)
             
         return signal

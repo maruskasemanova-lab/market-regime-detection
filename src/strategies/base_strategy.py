@@ -169,6 +169,8 @@ class BaseStrategy(ABC):
         self.positions: List[Position] = []
         self.signals_history: List[Signal] = []
         self.enabled = True
+        # Strategies that already use L2 internally should set this True
+        self._uses_l2_internally = False
         
     @abstractmethod
     def generate_signal(
@@ -197,6 +199,71 @@ class BaseStrategy(ABC):
     def is_allowed_in_regime(self, regime: Regime) -> bool:
         """Check if strategy is allowed in current regime."""
         return regime in self.allowed_regimes
+
+    def apply_l2_flow_boost(
+        self,
+        signal: Optional['Signal'],
+        indicators: Dict[str, Any],
+    ) -> Optional['Signal']:
+        """
+        Adjust signal confidence based on L2 order flow alignment.
+
+        When L2 data is available and the strategy doesn't already use L2
+        internally, this checks whether the order flow direction agrees with
+        the signal direction.
+
+        - Flow aligned with signal:   confidence += 5 .. 12
+        - Flow opposed to signal:     confidence -= 8 .. 15
+
+        The adjustment magnitude scales with the strength of the flow signal.
+        Returns the (potentially modified) signal, or None if signal was None.
+        """
+        if signal is None:
+            return None
+        if self._uses_l2_internally:
+            return signal
+
+        flow = indicators.get("order_flow") or {}
+        if not flow.get("has_l2_coverage", False):
+            return signal
+
+        # Extract key flow metrics
+        signed_aggr = float(flow.get("signed_aggression", 0.0) or 0.0)
+        imbalance = float(flow.get("imbalance_avg", 0.0) or 0.0)
+        consistency = float(flow.get("directional_consistency", 0.0) or 0.0)
+
+        # Determine signal direction: +1 for BUY, -1 for SELL
+        if signal.signal_type == SignalType.BUY:
+            direction = 1.0
+        elif signal.signal_type == SignalType.SELL:
+            direction = -1.0
+        else:
+            return signal  # HOLD / CLOSE signals — no boost
+
+        # Flow alignment score: how much flow agrees with signal direction
+        # Range roughly -1.0 .. +1.0
+        aggr_alignment = signed_aggr * direction  # positive = aligned
+        imb_alignment = imbalance * direction
+        # Consistency is unsigned (0..1), high is good for any direction
+        flow_alignment = (
+            0.45 * max(-1.0, min(1.0, aggr_alignment / 0.15))
+            + 0.35 * max(-1.0, min(1.0, imb_alignment / 0.10))
+            + 0.20 * max(-1.0, min(1.0, (consistency - 0.35) / 0.30))
+        )
+
+        if flow_alignment > 0.1:
+            # Flow confirms signal → boost +5 .. +12
+            boost = 5.0 + 7.0 * min(1.0, flow_alignment)
+            signal.confidence = min(100.0, signal.confidence + boost)
+            signal.metadata["l2_boost"] = round(boost, 1)
+        elif flow_alignment < -0.1:
+            # Flow opposes signal → penalize -8 .. -15
+            penalty = 8.0 + 7.0 * min(1.0, abs(flow_alignment))
+            signal.confidence = max(0.0, signal.confidence - penalty)
+            signal.metadata["l2_boost"] = round(-penalty, 1)
+        # else: neutral zone — no adjustment
+
+        return signal
     
     def calculate_atr_stop(self, price: float, atr: float, multiplier: float = 2.0, side: str = 'long') -> float:
         """Calculate ATR-based stop loss."""
