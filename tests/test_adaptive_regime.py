@@ -66,6 +66,35 @@ class TestL2FlowClassifier:
         ))
         assert probs[CHOPPY] > probs[TRENDING]
 
+    def test_micro_returns_mixed_during_adx_warmup(self):
+        clf = L2FlowClassifier()
+        micro = clf.classify_micro(_make_fv(adx_14=None, l2_has_coverage=True))
+        assert micro == "MIXED"
+
+    def test_micro_returns_transition_on_low_efficiency(self):
+        clf = L2FlowClassifier()
+        micro = clf.classify_micro(
+            _make_fv(
+                adx_14=26.0,
+                trend_efficiency=0.08,
+                roc_5=0.35,
+                l2_has_coverage=False,
+            )
+        )
+        assert micro == "TRANSITION"
+
+    def test_no_l2_path_requires_efficiency_and_adx_for_trend(self):
+        clf = L2FlowClassifier()
+        micro = clf.classify_micro(
+            _make_fv(
+                adx_14=38.0,
+                trend_efficiency=0.30,
+                roc_5=0.80,
+                l2_has_coverage=False,
+            )
+        )
+        assert micro != "TRENDING_UP"
+
 
 class TestAdaptiveRegimeDetector:
     def test_basic_detection(self):

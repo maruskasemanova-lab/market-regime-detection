@@ -7,6 +7,12 @@ from enum import Enum
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
+from ..strategy_formula_engine import (
+    SUPPORTED_FORMULA_VARIABLES,
+    formula_examples,
+    formula_variable_docs,
+)
+
 
 class SignalType(Enum):
     BUY = "BUY"
@@ -75,7 +81,23 @@ class Position:
     # Regime-aware trailing stop state
     break_even_stop_active: bool = False
     trailing_activation_pnl_met: bool = False
+    break_even_state: str = "idle"  # idle | armed | moved | locked | handoff
+    break_even_arm_bar_index: Optional[int] = None
+    break_even_move_bar_index: Optional[int] = None
+    break_even_activation_reason: str = ""
+    break_even_move_reason: str = ""
+    break_even_costs_pct: float = 0.0
+    break_even_buffer_pct: float = 0.0
+    break_even_last_update: Dict[str, Any] = field(default_factory=dict)
+    break_even_anti_spike_bars_remaining: int = 0
+    break_even_anti_spike_consecutive_hits: int = 0
+    break_even_anti_spike_consecutive_hits_required: int = 2
+    break_even_anti_spike_require_close_beyond: bool = True
+    initial_stop_loss: float = 0.0
     partial_take_profit_price: float = 0.0
+    partial_tp_filled: bool = False
+    partial_tp_size: float = 0.0
+    partial_realized_r: float = 0.0
     signal_bar_index: Optional[int] = None
     entry_bar_index: Optional[int] = None
     signal_timestamp: Optional[str] = None
@@ -155,6 +177,26 @@ class Position:
             'signal_metadata': self.signal_metadata,
             'break_even_stop_active': self.break_even_stop_active,
             'trailing_activation_pnl_met': self.trailing_activation_pnl_met,
+            'break_even_state': self.break_even_state,
+            'break_even_arm_bar_index': self.break_even_arm_bar_index,
+            'break_even_move_bar_index': self.break_even_move_bar_index,
+            'break_even_activation_reason': self.break_even_activation_reason,
+            'break_even_move_reason': self.break_even_move_reason,
+            'break_even_costs_pct': self.break_even_costs_pct,
+            'break_even_buffer_pct': self.break_even_buffer_pct,
+            'break_even_last_update': self.break_even_last_update,
+            'break_even_anti_spike_bars_remaining': self.break_even_anti_spike_bars_remaining,
+            'break_even_anti_spike_consecutive_hits': self.break_even_anti_spike_consecutive_hits,
+            'break_even_anti_spike_consecutive_hits_required': (
+                self.break_even_anti_spike_consecutive_hits_required
+            ),
+            'break_even_anti_spike_require_close_beyond': (
+                self.break_even_anti_spike_require_close_beyond
+            ),
+            'initial_stop_loss': self.initial_stop_loss,
+            'partial_tp_filled': self.partial_tp_filled,
+            'partial_tp_size': self.partial_tp_size,
+            'partial_realized_r': self.partial_realized_r,
         }
 
 
@@ -169,6 +211,26 @@ class BaseStrategy(ABC):
         self.positions: List[Position] = []
         self.signals_history: List[Signal] = []
         self.enabled = True
+        # Per-strategy source selectors:
+        # - "custom": use strategy-local params
+        # - "global": use module/global params (if set)
+        self.exit_mode = "custom"
+        self.risk_mode = "custom"
+        # Backward-compatible alias for trailing source.
+        self.trailing_stop_mode = "custom"
+        self.global_trailing_stop_pct: Optional[float] = None
+        self.global_rr_ratio: Optional[float] = None
+        self.global_atr_stop_multiplier: Optional[float] = None
+        self.global_volume_stop_pct: Optional[float] = None
+        self.global_min_stop_loss_pct: Optional[float] = None
+        # Optional custom formulas evaluated by runtime guardrails.
+        self.custom_entry_formula_enabled = False
+        self.custom_entry_formula = ""
+        self.custom_exit_formula_enabled = False
+        self.custom_exit_formula = ""
+        self.custom_formula_supported_variables = list(SUPPORTED_FORMULA_VARIABLES)
+        self.custom_formula_variable_docs = formula_variable_docs()
+        self.custom_formula_examples = formula_examples()
         # Strategies that already use L2 internally should set this True
         self._uses_l2_internally = False
         
@@ -283,6 +345,94 @@ class BaseStrategy(ABC):
         if side == 'long':
             return entry + (risk * rr_ratio)
         return entry - (risk * rr_ratio)
+
+    def normalize_source_mode(self, value: Any) -> str:
+        """Normalize source mode to one of the supported values."""
+        normalized = str(value or "").strip().lower()
+        return "global" if normalized == "global" else "custom"
+
+    def normalize_trailing_stop_mode(self, value: Any) -> str:
+        """Backward-compatible trailing mode normalization."""
+        return self.normalize_source_mode(value)
+
+    def _coerce_positive_float(self, value: Any) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if parsed <= 0:
+            return None
+        return parsed
+
+    def get_exit_mode(self) -> str:
+        raw_exit_mode = getattr(self, "exit_mode", None)
+        if raw_exit_mode is not None and str(raw_exit_mode).strip():
+            return self.normalize_source_mode(raw_exit_mode)
+        return self.normalize_source_mode(getattr(self, "trailing_stop_mode", "custom"))
+
+    def get_risk_mode(self) -> str:
+        return self.normalize_source_mode(getattr(self, "risk_mode", "custom"))
+
+    def _resolve_effective_param(
+        self,
+        *,
+        mode: str,
+        local_value: Any,
+        global_value: Any,
+    ) -> Optional[float]:
+        local_parsed = self._coerce_positive_float(local_value)
+        global_parsed = self._coerce_positive_float(global_value)
+        if self.normalize_source_mode(mode) == "global":
+            return global_parsed if global_parsed is not None else local_parsed
+        return local_parsed if local_parsed is not None else global_parsed
+
+    def get_effective_trailing_stop_pct(self) -> Optional[float]:
+        """Resolve trailing stop percent from exit mode and configured values."""
+        return self._resolve_effective_param(
+            mode=self.get_exit_mode(),
+            local_value=getattr(self, "trailing_stop_pct", None),
+            global_value=getattr(self, "global_trailing_stop_pct", None),
+        )
+
+    def get_effective_rr_ratio(self) -> Optional[float]:
+        """Resolve effective risk-reward ratio from exit mode."""
+        if not hasattr(self, "rr_ratio"):
+            return None
+        return self._resolve_effective_param(
+            mode=self.get_exit_mode(),
+            local_value=getattr(self, "rr_ratio", None),
+            global_value=getattr(self, "global_rr_ratio", None),
+        )
+
+    def get_effective_atr_stop_multiplier(self) -> Optional[float]:
+        """Resolve effective ATR stop multiplier from risk mode."""
+        if not hasattr(self, "atr_stop_multiplier"):
+            return None
+        return self._resolve_effective_param(
+            mode=self.get_risk_mode(),
+            local_value=getattr(self, "atr_stop_multiplier", None),
+            global_value=getattr(self, "global_atr_stop_multiplier", None),
+        )
+
+    def get_effective_volume_stop_pct(self) -> Optional[float]:
+        """Resolve effective volume-adjusted stop percent from risk mode."""
+        if not hasattr(self, "volume_stop_pct"):
+            return None
+        return self._resolve_effective_param(
+            mode=self.get_risk_mode(),
+            local_value=getattr(self, "volume_stop_pct", None),
+            global_value=getattr(self, "global_volume_stop_pct", None),
+        )
+
+    def get_effective_min_stop_loss_pct(self) -> Optional[float]:
+        """Resolve effective minimum stop-loss percent from risk mode."""
+        if not hasattr(self, "min_stop_loss_pct"):
+            return None
+        return self._resolve_effective_param(
+            mode=self.get_risk_mode(),
+            local_value=getattr(self, "min_stop_loss_pct", None),
+            global_value=getattr(self, "global_min_stop_loss_pct", None),
+        )
     
     def get_vwap_distance(self, price: float, vwap: float) -> float:
         """Calculate distance from VWAP as percentage."""
@@ -345,7 +495,7 @@ class BaseStrategy(ABC):
     
     def to_dict(self) -> Dict[str, Any]:
         """Serialize strategy state."""
-        return {
+        payload = {
             'name': self.name,
             'allowed_regimes': [r.value for r in self.allowed_regimes],
             'enabled': self.enabled,
@@ -353,3 +503,59 @@ class BaseStrategy(ABC):
             'total_signals': len(self.signals_history),
             'last_signal': self.get_last_signal().to_dict() if self.get_last_signal() else None
         }
+        has_exit_params = hasattr(self, "trailing_stop_pct") or hasattr(self, "rr_ratio")
+        if has_exit_params:
+            exit_mode = self.get_exit_mode()
+            payload["exit_mode"] = exit_mode
+            payload["trailing_stop_mode"] = exit_mode
+            payload["global_trailing_stop_pct"] = getattr(self, "global_trailing_stop_pct", None)
+            payload["effective_trailing_stop_pct"] = self.get_effective_trailing_stop_pct()
+            if hasattr(self, "rr_ratio"):
+                payload["global_rr_ratio"] = getattr(self, "global_rr_ratio", None)
+                payload["effective_rr_ratio"] = self.get_effective_rr_ratio()
+        has_risk_params = (
+            hasattr(self, "atr_stop_multiplier")
+            or hasattr(self, "volume_stop_pct")
+            or hasattr(self, "min_stop_loss_pct")
+        )
+        if has_risk_params:
+            payload["risk_mode"] = self.get_risk_mode()
+            if hasattr(self, "atr_stop_multiplier"):
+                payload["global_atr_stop_multiplier"] = getattr(
+                    self,
+                    "global_atr_stop_multiplier",
+                    None,
+                )
+                payload["effective_atr_stop_multiplier"] = self.get_effective_atr_stop_multiplier()
+            if hasattr(self, "volume_stop_pct"):
+                payload["global_volume_stop_pct"] = getattr(self, "global_volume_stop_pct", None)
+                payload["effective_volume_stop_pct"] = self.get_effective_volume_stop_pct()
+            if hasattr(self, "min_stop_loss_pct"):
+                payload["global_min_stop_loss_pct"] = getattr(
+                    self,
+                    "global_min_stop_loss_pct",
+                    None,
+                )
+                payload["effective_min_stop_loss_pct"] = self.get_effective_min_stop_loss_pct()
+        payload["custom_entry_formula_enabled"] = bool(
+            getattr(self, "custom_entry_formula_enabled", False)
+        )
+        payload["custom_entry_formula"] = str(
+            getattr(self, "custom_entry_formula", "") or ""
+        )
+        payload["custom_exit_formula_enabled"] = bool(
+            getattr(self, "custom_exit_formula_enabled", False)
+        )
+        payload["custom_exit_formula"] = str(
+            getattr(self, "custom_exit_formula", "") or ""
+        )
+        payload["custom_formula_supported_variables"] = list(
+            getattr(self, "custom_formula_supported_variables", [])
+        )
+        payload["custom_formula_variable_docs"] = dict(
+            getattr(self, "custom_formula_variable_docs", {})
+        )
+        payload["custom_formula_examples"] = dict(
+            getattr(self, "custom_formula_examples", {})
+        )
+        return payload

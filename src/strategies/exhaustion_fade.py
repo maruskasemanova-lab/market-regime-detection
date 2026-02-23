@@ -70,6 +70,10 @@ class ExhaustionFadeStrategy(BaseStrategy):
 
         atr_series = indicators.get("atr") or []
         atr_val = float(atr_series[-1]) if atr_series else max(current_price * 0.004, 0.01)
+        effective_atr_stop_multiplier = (
+            self.get_effective_atr_stop_multiplier() or self.atr_stop_multiplier
+        )
+        effective_rr_ratio = self.get_effective_rr_ratio() or self.rr_ratio
 
         # BUY: selling became extreme, but price no longer follows lower (bullish divergence).
         long_trigger = (
@@ -113,16 +117,16 @@ class ExhaustionFadeStrategy(BaseStrategy):
 
         if long_trigger:
             signal_type = SignalType.BUY
-            stop_loss = current_price - (atr_val * self.atr_stop_multiplier)
+            stop_loss = current_price - (atr_val * effective_atr_stop_multiplier)
             take_profit = self.calculate_take_profit(
-                current_price, stop_loss, self.rr_ratio, side="long"
+                current_price, stop_loss, effective_rr_ratio, side="long"
             )
             direction_label = "bullish_fade"
         else:
             signal_type = SignalType.SELL
-            stop_loss = current_price + (atr_val * self.atr_stop_multiplier)
+            stop_loss = current_price + (atr_val * effective_atr_stop_multiplier)
             take_profit = self.calculate_take_profit(
-                current_price, stop_loss, self.rr_ratio, side="short"
+                current_price, stop_loss, effective_rr_ratio, side="short"
             )
             direction_label = "bearish_fade"
 
@@ -135,7 +139,7 @@ class ExhaustionFadeStrategy(BaseStrategy):
             stop_loss=stop_loss,
             take_profit=take_profit,
             trailing_stop=True,
-            trailing_stop_pct=self.trailing_stop_pct,
+            trailing_stop_pct=self.get_effective_trailing_stop_pct(),
             reasoning=(
                 f"Exhaustion {direction_label}: delta_z {delta_z:+.2f}, "
                 f"divergence {divergence:+.2f}, absorption {absorption:.2f}, "

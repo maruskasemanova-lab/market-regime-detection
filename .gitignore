@@ -31,3 +31,7 @@ venv/
 .venv/
 *.egg-info/
 *.log
+.vercel
+
+# Local Axon index/cache artifacts
+.axon/

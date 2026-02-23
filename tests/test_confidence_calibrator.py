@@ -8,11 +8,11 @@ from src.confidence_calibrator import (
 class TestIsotonicCalibrator:
     def test_insufficient_data_returns_identity(self):
         cal = IsotonicCalibrator()
-        # Less than MIN_CALIBRATION_TRADES → identity mapping
+        # Less than MIN_CALIBRATION_TRADES -> conservative warmup mapping.
         for i in range(5):
             cal.update(70.0, True)
         result = cal.calibrate(70.0)
-        assert result == pytest.approx(0.70, abs=0.01)
+        assert result == pytest.approx(0.56, abs=0.01)
 
     def test_calibration_with_enough_data(self):
         cal = IsotonicCalibrator(n_bins=5, lookback=50)
@@ -37,9 +37,9 @@ class TestIsotonicCalibrator:
 class TestConfidenceCalibrator:
     def test_fallback_to_identity(self):
         cal = ConfidenceCalibrator()
-        # No data → identity mapping
+        # No data -> conservative warmup mapping
         result = cal.calibrate('momentum', 70.0, 'TRENDING')
-        assert result == pytest.approx(0.70, abs=0.01)
+        assert result == pytest.approx(0.56, abs=0.01)
 
     def test_per_strategy_calibration(self):
         cal = ConfidenceCalibrator(lookback_trades=30)

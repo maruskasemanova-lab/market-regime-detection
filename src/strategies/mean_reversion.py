@@ -22,11 +22,11 @@ class MeanReversionStrategy(BaseStrategy):
     
     def __init__(
         self,
-        entry_deviation_pct: float = 1.0,     # Increased from 0.3 - less false signals
+        entry_deviation_pct: float = 0.6,     # Loosened from 1.0
         min_confidence: float = 65.0,         # Higher bar for entries
         volume_confirmation: bool = True,
         volume_lookback: int = 20,
-        volume_exhaustion_ratio: float = 0.8, # Stricter exhaustion check
+        volume_exhaustion_ratio: float = 1.2, # Loosened exhaustion check (was 0.8)
         volume_stop_pct: float = 1.2,         # Wider stop (was 0.6)
         trailing_stop_pct: float = 0.6        # Wider trail (was 0.3)
     ):
@@ -79,12 +79,12 @@ class MeanReversionStrategy(BaseStrategy):
         adx_val = adx[-1] if isinstance(adx, list) else adx
         
         # Determine threshold based on regime
-        threshold = self.entry_deviation_pct  # Default (0.3 for Choppy)
+        threshold = self.entry_deviation_pct  # Default (0.6 for Choppy)
         
         if regime == Regime.TRENDING:
-            threshold = 2.0  # Much stricter for Trending (only fade extremes)
+            threshold = 1.2  # Stricter for Trending (only fade extremes)
         elif regime == Regime.MIXED:
-            threshold = 1.0  # Moderate for Mixed
+            threshold = 0.8  # Moderate for Mixed
             
         # Calculate deviation from VWAP
         vwap_distance_pct = self.get_vwap_distance(current_price, vwap_val)
@@ -98,6 +98,7 @@ class MeanReversionStrategy(BaseStrategy):
         avg_volume = volume_stats["avg"]
         current_volume = volume_stats["current"]
         volume_ratio = volume_stats["ratio"]
+        effective_volume_stop_pct = self.get_effective_volume_stop_pct() or self.volume_stop_pct
         
         signal = None
         confidence = 50.0
@@ -137,7 +138,7 @@ class MeanReversionStrategy(BaseStrategy):
                 reasoning_parts.append("CHOPPY regime favors mean reversion")
             
             if confidence >= self.min_confidence:
-                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_pct = self.volume_adjusted_pct(effective_volume_stop_pct, volume_ratio)
                 stop_loss = self.calculate_percent_stop(current_price, stop_pct, 'long')
                 take_profit = vwap_val  # Target VWAP
                 
@@ -150,7 +151,7 @@ class MeanReversionStrategy(BaseStrategy):
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     trailing_stop=True,
-                    trailing_stop_pct=self.trailing_stop_pct,
+                    trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                     reasoning=" | ".join(reasoning_parts),
                     metadata={
                         'vwap': vwap_val,
@@ -190,7 +191,7 @@ class MeanReversionStrategy(BaseStrategy):
                 reasoning_parts.append("CHOPPY regime favors mean reversion")
             
             if confidence >= self.min_confidence:
-                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_pct = self.volume_adjusted_pct(effective_volume_stop_pct, volume_ratio)
                 stop_loss = self.calculate_percent_stop(current_price, stop_pct, 'short')
                 take_profit = vwap_val  # Target VWAP
                 
@@ -203,7 +204,7 @@ class MeanReversionStrategy(BaseStrategy):
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     trailing_stop=True,
-                    trailing_stop_pct=self.trailing_stop_pct,
+                    trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                     reasoning=" | ".join(reasoning_parts),
                     metadata={
                         'vwap': vwap_val,

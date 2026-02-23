@@ -39,7 +39,7 @@ class VWAPMagnetStrategy(BaseStrategy):
     ):
         super().__init__(
             name="VWAPMagnet",
-            regimes=[Regime.TRENDING, Regime.CHOPPY, Regime.MIXED]  # All regimes
+            regimes=[Regime.CHOPPY, Regime.MIXED]  # Removed TRENDING due to poor mean reversion performance
         )
         self.min_distance_pct = min_distance_pct
         self.max_distance_pct = max_distance_pct
@@ -163,6 +163,7 @@ class VWAPMagnetStrategy(BaseStrategy):
         avg_volume = volume_stats["avg"]
         current_volume = volume_stats["current"]
         volume_ratio = volume_stats["ratio"]
+        effective_volume_stop_pct = self.get_effective_volume_stop_pct() or self.volume_stop_pct
         volume_declining = avg_volume and current_volume < avg_volume * 0.8
         
         signal = None
@@ -205,7 +206,7 @@ class VWAPMagnetStrategy(BaseStrategy):
                 reasoning_parts.append("CHOPPY regime favors VWAP return")
             
             if confidence >= self.min_confidence:
-                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_pct = self.volume_adjusted_pct(effective_volume_stop_pct, volume_ratio)
                 stop_loss = self.calculate_percent_stop(current_price, stop_pct, 'long')
                 take_profit = vwap_val  # Target VWAP exactly
                 
@@ -218,7 +219,7 @@ class VWAPMagnetStrategy(BaseStrategy):
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     trailing_stop=True,
-                    trailing_stop_pct=self.trailing_stop_pct,
+                    trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                     reasoning=" | ".join(reasoning_parts),
                     metadata={
                         'vwap': vwap_val,
@@ -248,7 +249,7 @@ class VWAPMagnetStrategy(BaseStrategy):
                 reasoning_parts.append("CHOPPY regime favors VWAP return")
             
             if confidence >= self.min_confidence:
-                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_pct = self.volume_adjusted_pct(effective_volume_stop_pct, volume_ratio)
                 stop_loss = self.calculate_percent_stop(current_price, stop_pct, 'short')
                 take_profit = vwap_val
                 
@@ -261,7 +262,7 @@ class VWAPMagnetStrategy(BaseStrategy):
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     trailing_stop=True,
-                    trailing_stop_pct=self.trailing_stop_pct,
+                    trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                     reasoning=" | ".join(reasoning_parts),
                     metadata={
                         'vwap': vwap_val,

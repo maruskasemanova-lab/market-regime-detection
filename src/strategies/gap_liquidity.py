@@ -28,10 +28,10 @@ class GapLiquidityStrategy(BaseStrategy):
     
     def __init__(
         self,
-        gap_threshold_pct: float = 0.3,       # Min gap size to trade
+        gap_threshold_pct: float = 0.2,       # Min gap size to trade (lowered for pre/post session fallback)
         swing_lookback: int = 20,             # Bars to find swing points
         liquidity_cluster_bars: int = 5,      # Bars for liquidity cluster
-        gap_fill_tolerance_pct: float = 0.1,  # How close for gap fill signal
+        gap_fill_tolerance_pct: float = 0.25, # How close for gap fill signal (widened)
         min_confidence: float = 65.0,
         atr_stop_mult: float = 2.5,
         rr_ratio: float = 2.5,
@@ -234,8 +234,24 @@ class GapLiquidityStrategy(BaseStrategy):
         vwap = indicators.get('vwap')
         vwap_val = vwap[-1] if isinstance(vwap, list) else (vwap or current_price)
         
-        # Detect gap
-        gap = self.detect_gap(opens, closes, highs, lows)
+        # Detect gap (prioritize true daily gap context from indicators)
+        intraday_levels = indicators.get('intraday_levels', {})
+        if intraday_levels and 'gap_context' in intraday_levels:
+            gc = intraday_levels['gap_context']
+            gap_dir = gc.get('gap_direction', 'none')
+            gap = {
+                'type': gap_dir if gap_dir != 'none' else None,
+                'size_pct': gc.get('gap_pct', 0.0),
+                'level': gc.get('gap_fill_target'),
+                'prev_close': gc.get('prev_close')
+            }
+            # Enforce strategy's own threshold
+            if gap['type'] is not None and abs(gap['size_pct']) < self.gap_threshold_pct:
+                gap['type'] = None
+                gap['level'] = None
+        else:
+            # Fallback to older logic (which might inadvertently use 1m bars if no historical daily OHLC is fed)
+            gap = self.detect_gap(opens, closes, highs, lows)
         
         # Find swing levels
         swings = self.find_swing_levels(
@@ -250,6 +266,7 @@ class GapLiquidityStrategy(BaseStrategy):
         # Volume confirmation
         volume_stats = self.get_volume_stats(volumes, self.volume_lookback)
         volume_ratio = volume_stats['ratio']
+        effective_rr_ratio = self.get_effective_rr_ratio() or self.rr_ratio
         
         signal = None
         confidence = 50.0
@@ -287,7 +304,7 @@ class GapLiquidityStrategy(BaseStrategy):
                         # Target: Next swing low or VWAP
                         take_profit = min(swings.get('swing_lows', [vwap_val])[:1] or [vwap_val])
                         if take_profit >= current_price:
-                            take_profit = current_price - atr_val * self.rr_ratio
+                            take_profit = current_price - atr_val * effective_rr_ratio
                         
                         signal = Signal(
                             strategy_name=self.name,
@@ -298,7 +315,7 @@ class GapLiquidityStrategy(BaseStrategy):
                             stop_loss=stop_loss,
                             take_profit=take_profit,
                             trailing_stop=True,
-                            trailing_stop_pct=self.trailing_stop_pct,
+                            trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                             reasoning=" | ".join(reasoning_parts),
                             metadata={
                                 'gap_type': gap['type'],
@@ -327,7 +344,7 @@ class GapLiquidityStrategy(BaseStrategy):
                         
                         take_profit = max(swings.get('swing_highs', [vwap_val])[:1] or [vwap_val])
                         if take_profit <= current_price:
-                            take_profit = current_price + atr_val * self.rr_ratio
+                            take_profit = current_price + atr_val * effective_rr_ratio
                         
                         signal = Signal(
                             strategy_name=self.name,
@@ -338,7 +355,7 @@ class GapLiquidityStrategy(BaseStrategy):
                             stop_loss=stop_loss,
                             take_profit=take_profit,
                             trailing_stop=True,
-                            trailing_stop_pct=self.trailing_stop_pct,
+                            trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                             reasoning=" | ".join(reasoning_parts),
                             metadata={
                                 'gap_type': gap['type'],
@@ -367,7 +384,7 @@ class GapLiquidityStrategy(BaseStrategy):
                     if confidence >= self.min_confidence:
                         stop_loss = pattern['point3'] - atr_val * 0.5  # Below point 3
                         take_profit = self.calculate_take_profit(
-                            current_price, stop_loss, self.rr_ratio, 'long'
+                            current_price, stop_loss, effective_rr_ratio, 'long'
                         )
                         
                         signal = Signal(
@@ -379,7 +396,7 @@ class GapLiquidityStrategy(BaseStrategy):
                             stop_loss=stop_loss,
                             take_profit=take_profit,
                             trailing_stop=True,
-                            trailing_stop_pct=self.trailing_stop_pct,
+                            trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                             reasoning=" | ".join(reasoning_parts),
                             metadata={
                                 'pattern': '1-2-3 bullish',
@@ -404,7 +421,7 @@ class GapLiquidityStrategy(BaseStrategy):
                     if confidence >= self.min_confidence:
                         stop_loss = pattern['point3'] + atr_val * 0.5  # Above point 3
                         take_profit = self.calculate_take_profit(
-                            current_price, stop_loss, self.rr_ratio, 'short'
+                            current_price, stop_loss, effective_rr_ratio, 'short'
                         )
                         
                         signal = Signal(
@@ -416,7 +433,7 @@ class GapLiquidityStrategy(BaseStrategy):
                             stop_loss=stop_loss,
                             take_profit=take_profit,
                             trailing_stop=True,
-                            trailing_stop_pct=self.trailing_stop_pct,
+                            trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                             reasoning=" | ".join(reasoning_parts),
                             metadata={
                                 'pattern': '1-2-3 bearish',
@@ -430,6 +447,22 @@ class GapLiquidityStrategy(BaseStrategy):
         
         if signal:
             signal = self.apply_l2_flow_boost(signal, indicators)
+            
+            # Additional cost-aware filter fallback (ensure reasonable minimum risk distance)
+            if hasattr(signal, 'stop_loss') and signal.stop_loss and hasattr(signal, 'price') and signal.price:
+                risk_pct = abs(signal.stop_loss - signal.price) / max(signal.price, 1e-9) * 100.0
+                if risk_pct < 0.15: # Force at least 15bps risk
+                    if signal.signal_type == SignalType.BUY:
+                        signal.stop_loss = signal.price * (1 - 0.0015)
+                    elif signal.signal_type == SignalType.SELL:
+                        signal.stop_loss = signal.price * (1 + 0.0015)
+                    # Recalculate TP
+                    if hasattr(signal, 'take_profit') and signal.take_profit:
+                        if signal.signal_type == SignalType.BUY:
+                            signal.take_profit = signal.price + (abs(signal.stop_loss - signal.price) * effective_rr_ratio)
+                        elif signal.signal_type == SignalType.SELL:
+                            signal.take_profit = signal.price - (abs(signal.stop_loss - signal.price) * effective_rr_ratio)
+
             self.add_signal(signal)
             
         return signal

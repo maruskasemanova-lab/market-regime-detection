@@ -110,6 +110,23 @@ class TestAdaptiveWeightCombiner:
         r2 = combiner.combine(signals, 'TRENDING', regime_confidence=0.8, time_of_day_boost=5.0)
         assert r2.threshold_used > r1.threshold_used
 
+    def test_uncertainty_penalty_is_warmup_aware(self):
+        combiner = AdaptiveWeightCombiner(base_threshold=50.0)
+        signals = [_sig('strategy', 'a', cal=0.55), _sig('pattern', 'b', cal=0.55)]
+        early = combiner.combine(
+            signals,
+            'TRENDING',
+            regime_confidence=0.34,
+            regime_age_bars=1,
+        )
+        mature = combiner.combine(
+            signals,
+            'TRENDING',
+            regime_confidence=0.34,
+            regime_age_bars=60,
+        )
+        assert mature.threshold_used > early.threshold_used
+
     def test_to_dict(self):
         result = EnsembleScore(
             execute=True, direction='bullish', combined_score=72.5,

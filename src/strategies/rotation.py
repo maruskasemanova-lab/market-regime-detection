@@ -100,6 +100,7 @@ class RotationStrategy(BaseStrategy):
         avg_volume = volume_stats["avg"]
         current_volume = volume_stats["current"]
         volume_ratio = volume_stats["ratio"]
+        effective_volume_stop_pct = self.get_effective_volume_stop_pct() or self.volume_stop_pct
         recent_volume = sum(volumes[-3:]) / 3 if len(volumes) >= 3 else current_volume
         volume_increasing = avg_volume and recent_volume > avg_volume * self.volume_increase_ratio
         
@@ -132,7 +133,7 @@ class RotationStrategy(BaseStrategy):
                 reasoning_parts.append("Volume building")
             
             if confidence >= self.min_confidence:
-                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_pct = self.volume_adjusted_pct(effective_volume_stop_pct, volume_ratio)
                 stop_loss = self.calculate_percent_stop(current_price, stop_pct, 'long')
                 take_profit = self.calculate_take_profit(current_price, stop_loss, 2.0, 'long')
                 
@@ -145,7 +146,7 @@ class RotationStrategy(BaseStrategy):
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     trailing_stop=True,
-                    trailing_stop_pct=self.trailing_stop_pct,
+                    trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                     reasoning=" | ".join(reasoning_parts),
                     metadata={
                         'performance': performance,
@@ -182,7 +183,7 @@ class RotationStrategy(BaseStrategy):
                 reasoning_parts.append("Volume building")
             
             if confidence >= self.min_confidence:
-                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_pct = self.volume_adjusted_pct(effective_volume_stop_pct, volume_ratio)
                 stop_loss = self.calculate_percent_stop(current_price, stop_pct, 'short')
                 take_profit = self.calculate_take_profit(current_price, stop_loss, 2.0, 'short')
                 
@@ -195,7 +196,7 @@ class RotationStrategy(BaseStrategy):
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     trailing_stop=True,
-                    trailing_stop_pct=self.trailing_stop_pct,
+                    trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                     reasoning=" | ".join(reasoning_parts),
                     metadata={
                         'performance': performance,

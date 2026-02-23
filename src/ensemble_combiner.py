@@ -1,7 +1,7 @@
 """
 Adaptive Ensemble Combiner with Bayesian Shrinkage.
 
-Replaces fixed pattern_weight=0.4 / strategy_weight=0.6 with
+Replaces fixed legacy heuristic weights with
 adaptive weights that learn from recent strategy performance.
 
 Anti-bias:
@@ -126,11 +126,15 @@ class AdaptiveWeightCombiner:
         base_threshold: float = 55.0,
         min_margin_over_threshold: float = 5.0,  # Increased from 3 to 5
         single_source_min_margin: float = 10.0,  # Increased from 6 to 10
+        uncertainty_penalty_scale: float = 8.0,
+        uncertainty_penalty_warmup_bars: int = 20,
     ):
         self._min_confirming = min_confirming_sources
         self._base_threshold = base_threshold
         self._min_margin = min_margin_over_threshold
         self._single_source_margin = single_source_min_margin
+        self._uncertainty_penalty_scale = max(0.0, float(uncertainty_penalty_scale))
+        self._uncertainty_penalty_warmup_bars = max(1, int(uncertainty_penalty_warmup_bars))
 
         # Performance tracking: (source_type, source_name, regime) → SourcePerformance
         self._performance: Dict[Tuple[str, str, str], SourcePerformance] = {}
@@ -147,6 +151,7 @@ class AdaptiveWeightCombiner:
         transition_velocity: float = 0.0,
         trend_efficiency: Optional[float] = None,
         is_transition: bool = False,
+        regime_age_bars: Optional[int] = None,
     ) -> EnsembleScore:
         """
         Combine calibrated signals into ensemble decision.
@@ -217,7 +222,7 @@ class AdaptiveWeightCombiner:
         # Dynamic threshold
         threshold = self._compute_dynamic_threshold(
             regime, regime_confidence, time_of_day_boost, transition_velocity,
-            trend_efficiency, is_transition,
+            trend_efficiency, is_transition, regime_age_bars,
         )
 
         # Confirming sources check (lowered from 0.45 to 0.35 —
@@ -383,6 +388,7 @@ class AdaptiveWeightCombiner:
         transition_velocity: float,
         trend_efficiency: Optional[float] = None,
         is_transition: bool = False,
+        regime_age_bars: Optional[int] = None,
     ) -> float:
         """
         Dynamic threshold based on context.
@@ -397,10 +403,19 @@ class AdaptiveWeightCombiner:
         """
         threshold = self._base_threshold
 
-        # Regime uncertainty penalty: +0 to +5 (reduced from 15x to 8x)
-        # Previous 15x multiplier pushed threshold too high with typical
-        # confidence values of 0.4-0.6, making trades nearly impossible.
-        uncertainty_penalty = max(0.0, (1.0 - regime_confidence) * 8.0)
+        # Regime uncertainty penalty with warmup ramp:
+        # avoid heavily penalizing the first bars where confidence is
+        # intentionally conservative and still stabilizing.
+        uncertainty_penalty = max(
+            0.0,
+            (1.0 - regime_confidence) * self._uncertainty_penalty_scale,
+        )
+        if regime_age_bars is not None:
+            warmup_ratio = min(
+                1.0,
+                max(0.0, float(regime_age_bars) / float(self._uncertainty_penalty_warmup_bars)),
+            )
+            uncertainty_penalty *= warmup_ratio
         threshold += uncertainty_penalty
 
         # Time of day

@@ -59,8 +59,7 @@ class OrchestratorConfig:
         default_factory=lambda: ['QQQ']
     )
 
-    # Legacy compatibility weights (used in DecisionResult)
-    pattern_weight: float = 0.4
+    # Legacy compatibility weights (used in DecisionResult/layer diagnostics)
     strategy_weight: float = 0.6
     strategy_only_threshold: float = 0.0
 
@@ -133,7 +132,6 @@ class TradingOrchestrator:
             edge_monitor=self.edge_monitor,
             min_confirming_sources=self.config.min_confirming_sources,
             base_threshold=self.config.base_threshold,
-            pattern_weight=self.config.pattern_weight,
             strategy_weight=self.config.strategy_weight,
             strategy_only_threshold=self.config.strategy_only_threshold,
         )

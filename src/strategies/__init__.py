@@ -15,6 +15,7 @@ from .absorption_reversal import AbsorptionReversalStrategy
 from .momentum_flow import MomentumFlowStrategy
 from .exhaustion_fade import ExhaustionFadeStrategy
 from .iceberg_defense import IcebergDefenseStrategy
+from .scalp_l2_intrabar import ScalpL2IntrabarStrategy
 
 __all__ = [
     'BaseStrategy',
@@ -33,4 +34,5 @@ __all__ = [
     'MomentumFlowStrategy',
     'ExhaustionFadeStrategy',
     'IcebergDefenseStrategy',
+    'ScalpL2IntrabarStrategy',
 ]

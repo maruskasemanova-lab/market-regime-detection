@@ -10,16 +10,22 @@ Anti-bias:
   - Falls back to identity mapping with insufficient data
   - Rolling window (50 trades) prevents stale calibration
 """
-import math
 import logging
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
 
 # Minimum trades before calibration kicks in
 MIN_CALIBRATION_TRADES = 20
+# Conservative bias while calibrator is still warming up.
+UNCALIBRATED_CONFIDENCE_MULTIPLIER = 0.8
+
+
+def _conservative_identity(raw_confidence: float) -> float:
+    base = max(0.0, min(1.0, raw_confidence / 100.0))
+    return max(0.0, min(1.0, base * UNCALIBRATED_CONFIDENCE_MULTIPLIER))
 
 
 @dataclass
@@ -59,8 +65,7 @@ class IsotonicCalibrator:
         Returns value in [0, 1].
         """
         if self.n_trades < MIN_CALIBRATION_TRADES:
-            # Insufficient data → identity mapping (0-100 → 0-1)
-            return max(0.0, min(1.0, raw_confidence / 100.0))
+            return _conservative_identity(raw_confidence)
 
         # Bin outcomes by confidence range
         bin_width = 100.0 / self.n_bins
@@ -90,7 +95,7 @@ class IsotonicCalibrator:
                 rates.append((b, r))
 
         if not rates:
-            return max(0.0, min(1.0, raw_confidence / 100.0))
+            return _conservative_identity(raw_confidence)
 
         # Pool-adjacent-violators for monotonicity
         isotonic_rates = self._pava([r for _, r in rates])
@@ -106,7 +111,7 @@ class IsotonicCalibrator:
         # Linear interpolation between nearest known bins
         known_bins = sorted(rate_map.keys())
         if not known_bins:
-            return max(0.0, min(1.0, raw_confidence / 100.0))
+            return _conservative_identity(raw_confidence)
 
         if query_bin <= known_bins[0]:
             return max(0.0, min(1.0, rate_map[known_bins[0]]))
@@ -194,8 +199,8 @@ class ConfidenceCalibrator:
         if self._global_calibrator.n_trades >= MIN_CALIBRATION_TRADES:
             return self._global_calibrator.calibrate(raw_confidence)
 
-        # Identity fallback
-        return max(0.0, min(1.0, raw_confidence / 100.0))
+        # Conservative fallback while calibration has insufficient support.
+        return _conservative_identity(raw_confidence)
 
     def update(
         self,

@@ -109,6 +109,8 @@ class MomentumStrategy(BaseStrategy):
         avg_volume = volume_stats["avg"]
         current_volume = volume_stats["current"]
         volume_ratio = volume_stats["ratio"]
+        effective_volume_stop_pct = self.get_effective_volume_stop_pct() or self.volume_stop_pct
+        effective_rr_ratio = self.get_effective_rr_ratio() or self.rr_ratio
         volume_surge = avg_volume and current_volume >= avg_volume * self.volume_threshold
         
         # Filter: Strong Momentum using ADX (lowered from 35 for more trade opportunities)
@@ -162,9 +164,9 @@ class MomentumStrategy(BaseStrategy):
                 reasoning_parts.append("Strong breakout candle")
             
             if confidence >= self.min_confidence:
-                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_pct = self.volume_adjusted_pct(effective_volume_stop_pct, volume_ratio)
                 stop_loss = max(consol_low, current_price * (1 - stop_pct / 100))
-                take_profit = self.calculate_take_profit(current_price, stop_loss, self.rr_ratio, 'long')
+                take_profit = self.calculate_take_profit(current_price, stop_loss, effective_rr_ratio, 'long')
                 
                 signal = Signal(
                     strategy_name=self.name,
@@ -175,7 +177,7 @@ class MomentumStrategy(BaseStrategy):
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     trailing_stop=True,
-                    trailing_stop_pct=self.trailing_stop_pct,
+                    trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                     reasoning=" | ".join(reasoning_parts),
                     metadata={
                         'consol_high': consol_high,
@@ -229,9 +231,9 @@ class MomentumStrategy(BaseStrategy):
                 reasoning_parts.append("Strong breakdown candle")
             
             if confidence >= self.min_confidence:
-                stop_pct = self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio)
+                stop_pct = self.volume_adjusted_pct(effective_volume_stop_pct, volume_ratio)
                 stop_loss = min(consol_high, current_price * (1 + stop_pct / 100))
-                take_profit = self.calculate_take_profit(current_price, stop_loss, self.rr_ratio, 'short')
+                take_profit = self.calculate_take_profit(current_price, stop_loss, effective_rr_ratio, 'short')
                 
                 signal = Signal(
                     strategy_name=self.name,
@@ -242,7 +244,7 @@ class MomentumStrategy(BaseStrategy):
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     trailing_stop=True,
-                    trailing_stop_pct=self.trailing_stop_pct,
+                    trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                     reasoning=" | ".join(reasoning_parts),
                     metadata={
                         'consol_high': consol_high,

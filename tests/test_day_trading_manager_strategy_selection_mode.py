@@ -1,3 +1,4 @@
+from typing import Any, Dict, List, Optional, Tuple
 """Tests for strategy-selection modes in DayTradingManager."""
 
 from datetime import datetime, timedelta
@@ -54,8 +55,9 @@ def _adaptive_pref_config(
     use_ohlcv_fallbacks: bool,
     min_active_bars_before_switch: int = 0,
     switch_cooldown_bars: int = 0,
+    momentum_diversification: Optional[dict] = None,
 ) -> dict:
-    return {
+    payload = {
         "regime_preferences": {
             "TRENDING": ["mean_reversion"],
             "CHOPPY": ["mean_reversion"],
@@ -68,6 +70,8 @@ def _adaptive_pref_config(
             "ABSORPTION": [],
             "BREAKOUT": [],
             "MIXED": [],
+            "TRANSITION": [],
+            "UNKNOWN": [],
         },
         "flow_bias_enabled": flow_bias_enabled,
         "use_ohlcv_fallbacks": use_ohlcv_fallbacks,
@@ -75,6 +79,9 @@ def _adaptive_pref_config(
         "min_active_bars_before_switch": min_active_bars_before_switch,
         "switch_cooldown_bars": switch_cooldown_bars,
     }
+    if momentum_diversification is not None:
+        payload["momentum_diversification"] = momentum_diversification
+    return payload
 
 
 def _prepare_switch_guard_session(manager: DayTradingManager):
@@ -103,6 +110,16 @@ def test_adaptive_top_n_respects_max_active_strategies() -> None:
     session.micro_regime = "TRENDING_UP"
     session.strategy_selection_mode = "adaptive_top_n"
     session.max_active_strategies = 2
+    manager.ticker_params["MU"] = {
+        "adaptive": _adaptive_pref_config(
+            flow_bias_enabled=False,
+            use_ohlcv_fallbacks=False,
+        ),
+    }
+    manager.ticker_params["MU"]["adaptive"]["regime_preferences"]["TRENDING"] = [
+        "momentum_flow",
+        "mean_reversion",
+    ]
 
     selected = manager._select_strategies(session)
     assert len(selected) == 2
@@ -119,6 +136,12 @@ def test_all_enabled_mode_returns_all_enabled_regime_compatible_strategies() -> 
     session.micro_regime = "TRENDING_UP"
     session.strategy_selection_mode = "all_enabled"
     session.max_active_strategies = 1
+    manager.ticker_params["MU"] = {
+        "adaptive": _adaptive_pref_config(
+            flow_bias_enabled=False,
+            use_ohlcv_fallbacks=False,
+        ),
+    }
 
     selected = manager._select_strategies(session)
     assert set(selected) == enabled
@@ -248,3 +271,109 @@ def test_switch_guard_allows_strategy_change_after_thresholds() -> None:
     assert session.active_strategies == ["mean_reversion"]
     assert session.last_strategy_switch_bar_index == 25
     assert payload["switch_guard"]["blocked"] is False
+
+
+def test_momentum_diversification_route_prioritizes_defensive_stack() -> None:
+    manager = DayTradingManager(regime_detection_minutes=0)
+    enabled = {"momentum_flow", "momentum", "pullback", "absorption_reversal", "mean_reversion"}
+    _configure_enabled_set(manager, enabled)
+
+    session = manager.get_or_create_session("run", "MU", "2026-02-03")
+    session.detected_regime = Regime.TRENDING
+    session.micro_regime = "CHOPPY"
+    session.strategy_selection_mode = "adaptive_top_n"
+    session.max_active_strategies = 2
+    session.bars = _make_l2_bars(16)
+
+    manager.ticker_params["MU"] = {
+        "adaptive": _adaptive_pref_config(
+            flow_bias_enabled=False,
+            use_ohlcv_fallbacks=False,
+            momentum_diversification={
+                "enabled": True,
+                "route_enabled": True,
+                "route_strategy_map": {
+                    "impulse": ["momentum_flow"],
+                    "continuation": ["pullback", "momentum_flow"],
+                    "defensive": ["absorption_reversal", "mean_reversion"],
+                },
+                "micro_regime_routes": {
+                    "CHOPPY": "defensive",
+                    "TRENDING_UP": "impulse",
+                    "TRENDING_DOWN": "impulse",
+                    "MIXED": "continuation",
+                    "ABSORPTION": "defensive",
+                    "BREAKOUT": "impulse",
+                },
+            },
+        ),
+    }
+
+    selected = manager._select_strategies(session)
+    assert selected[:2] == ["absorption_reversal", "mean_reversion"]
+
+
+def test_momentum_diversification_route_supports_multi_sleeve_map() -> None:
+    manager = DayTradingManager(regime_detection_minutes=0)
+    enabled = {"momentum_flow", "pullback", "absorption_reversal", "mean_reversion"}
+    _configure_enabled_set(manager, enabled)
+
+    session = manager.get_or_create_session("run", "MU", "2026-02-03")
+    session.detected_regime = Regime.TRENDING
+    session.micro_regime = "CHOPPY"
+    session.strategy_selection_mode = "adaptive_top_n"
+    session.max_active_strategies = 2
+    session.bars = _make_l2_bars(16)
+
+    manager.ticker_params["MU"] = {
+        "adaptive": _adaptive_pref_config(
+            flow_bias_enabled=False,
+            use_ohlcv_fallbacks=False,
+            momentum_diversification={
+                "enabled": True,
+                "sleeves": [
+                    {
+                        "sleeve_id": "impulse",
+                        "enabled": True,
+                        "route_enabled": True,
+                        "apply_to_strategies": ["momentum_flow"],
+                        "route_strategy_map": {
+                            "impulse": ["momentum_flow"],
+                            "continuation": ["pullback"],
+                            "defensive": ["momentum_flow"],
+                        },
+                        "micro_regime_routes": {
+                            "CHOPPY": "impulse",
+                            "TRENDING_UP": "impulse",
+                            "TRENDING_DOWN": "impulse",
+                            "MIXED": "continuation",
+                            "ABSORPTION": "defensive",
+                            "BREAKOUT": "impulse",
+                        },
+                    },
+                    {
+                        "sleeve_id": "defensive",
+                        "enabled": True,
+                        "route_enabled": True,
+                        "apply_to_strategies": ["absorption_reversal"],
+                        "route_strategy_map": {
+                            "impulse": ["pullback"],
+                            "continuation": ["pullback"],
+                            "defensive": ["absorption_reversal", "mean_reversion"],
+                        },
+                        "micro_regime_routes": {
+                            "CHOPPY": "defensive",
+                            "TRENDING_UP": "impulse",
+                            "TRENDING_DOWN": "impulse",
+                            "MIXED": "continuation",
+                            "ABSORPTION": "defensive",
+                            "BREAKOUT": "impulse",
+                        },
+                    },
+                ],
+            },
+        ),
+    }
+
+    selected = manager._select_strategies(session)
+    assert selected[:2] == ["absorption_reversal", "mean_reversion"]

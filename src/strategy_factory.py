@@ -17,6 +17,7 @@ from .strategies.absorption_reversal import AbsorptionReversalStrategy
 from .strategies.momentum_flow import MomentumFlowStrategy
 from .strategies.exhaustion_fade import ExhaustionFadeStrategy
 from .strategies.iceberg_defense import IcebergDefenseStrategy
+from .strategies.scalp_l2_intrabar import ScalpL2IntrabarStrategy
 
 
 def build_strategy_registry() -> Dict[str, BaseStrategy]:
@@ -33,5 +34,5 @@ def build_strategy_registry() -> Dict[str, BaseStrategy]:
         "momentum_flow": MomentumFlowStrategy(),
         "exhaustion_fade": ExhaustionFadeStrategy(),
         "iceberg_defense": IcebergDefenseStrategy(),
+        "scalp_l2_intrabar": ScalpL2IntrabarStrategy(),
     }
-

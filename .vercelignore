@@ -1,0 +1,9 @@
+# Local data / artifacts not needed for strategy API deploy
+data/
+frontend/
+tests/
+__pycache__/
+.pytest_cache/
+*.log
+*.csv
+.DS_Store

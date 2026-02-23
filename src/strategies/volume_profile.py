@@ -256,6 +256,7 @@ class VolumeProfileStrategy(BaseStrategy):
         # Volume confirmation
         volume_stats = self.get_volume_stats(volumes, self.volume_lookback)
         volume_ratio = volume_stats['ratio']
+        effective_rr_ratio = self.get_effective_rr_ratio() or self.rr_ratio
         
         signal = None
         confidence = 50.0
@@ -288,7 +289,7 @@ class VolumeProfileStrategy(BaseStrategy):
                         if confidence >= self.min_confidence:
                             stop_loss = current_price + atr_val * self.atr_stop_mult
                             take_profit = self.calculate_take_profit(
-                                current_price, stop_loss, self.rr_ratio, 'short'
+                                current_price, stop_loss, effective_rr_ratio, 'short'
                             )
                             
                             signal = Signal(
@@ -300,7 +301,7 @@ class VolumeProfileStrategy(BaseStrategy):
                                 stop_loss=stop_loss,
                                 take_profit=take_profit,
                                 trailing_stop=True,
-                                trailing_stop_pct=self.trailing_stop_pct,
+                                trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                                 reasoning=" | ".join(reasoning_parts),
                                 metadata={
                                     'profile_type': profile['profile_type'],
@@ -340,7 +341,7 @@ class VolumeProfileStrategy(BaseStrategy):
                         if confidence >= self.min_confidence:
                             stop_loss = current_price - atr_val * self.atr_stop_mult
                             take_profit = self.calculate_take_profit(
-                                current_price, stop_loss, self.rr_ratio, 'long'
+                                current_price, stop_loss, effective_rr_ratio, 'long'
                             )
                             
                             signal = Signal(
@@ -352,7 +353,7 @@ class VolumeProfileStrategy(BaseStrategy):
                                 stop_loss=stop_loss,
                                 take_profit=take_profit,
                                 trailing_stop=True,
-                                trailing_stop_pct=self.trailing_stop_pct,
+                                trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                                 reasoning=" | ".join(reasoning_parts),
                                 metadata={
                                     'profile_type': profile['profile_type'],
@@ -391,7 +392,7 @@ class VolumeProfileStrategy(BaseStrategy):
                                 stop_loss=stop_loss,
                                 take_profit=take_profit,
                                 trailing_stop=True,
-                                trailing_stop_pct=self.trailing_stop_pct,
+                                trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                                 reasoning=" | ".join(reasoning_parts),
                                 metadata={
                                     'profile_type': 'D',
@@ -426,7 +427,7 @@ class VolumeProfileStrategy(BaseStrategy):
                                 stop_loss=stop_loss,
                                 take_profit=take_profit,
                                 trailing_stop=True,
-                                trailing_stop_pct=self.trailing_stop_pct,
+                                trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                                 reasoning=" | ".join(reasoning_parts),
                                 metadata={
                                     'profile_type': 'D',

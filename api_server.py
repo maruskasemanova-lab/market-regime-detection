@@ -2,10 +2,15 @@
 FastAPI Server for Trading Strategy System.
 Connects to the existing backtest API on localhost:8000.
 """
-from fastapi import FastAPI, HTTPException
+import os
+import re
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from urllib.parse import urlparse
 import math
 import uvicorn
 from datetime import datetime
@@ -15,11 +20,31 @@ from src.api_models import (
     SessionQuery,
     StrategyToggle,
     StrategyUpdate,
-    TradingConfig,
+    TradingConfig as TradingConfigModel,
 )
 from src.api_utils import coerce_regimes, get_regime_description, normalize_strategy_name
 from src.strategy_engine import StrategyEngine
 from src.day_trading_manager import DayTradingManager
+from src.trading_config import TradingConfig
+from src.strategy_formula_engine import (
+    StrategyFormulaValidationError,
+    validate_strategy_formula,
+)
+from src.runtime_exit_formulas import normalize_runtime_exit_formula_fields
+from src.api_server_helpers.session_config import (
+    build_session_config_payload,
+    merge_body_payload,
+    parse_momentum_diversification_payload,
+    parse_regime_filter_payload,
+    resolve_json_string_override,
+    resolve_optional_override,
+)
+from src.api_server_helpers.trading_config import (
+    apply_global_trading_config,
+    apply_trading_limits,
+    read_global_trading_config,
+    read_trading_limits,
+)
 
 
 
@@ -30,14 +55,119 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
+_cors_allow_origins_raw = str(
+    os.getenv(
+        "STRATEGY_CORS_ALLOW_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8002,http://127.0.0.1:8002",
+    )
+    or ""
+).strip()
+if not _cors_allow_origins_raw:
+    _cors_allow_origins: List[str] = []
+else:
+    _cors_allow_origins = list(
+        dict.fromkeys(
+            token.strip()
+            for token in _cors_allow_origins_raw.split(",")
+            if token.strip()
+        )
+    )
+if "*" in _cors_allow_origins:
+    _cors_allow_origins = ["*"]
+
+_cors_allow_origin_regex = str(
+    os.getenv("STRATEGY_CORS_ALLOW_ORIGIN_REGEX", "") or ""
+).strip()
+if not _cors_allow_origin_regex:
+    _cors_patterns: List[str] = []
+    _cors_seen: set[str] = set()
+    for _origin in _cors_allow_origins:
+        try:
+            _parsed = urlparse(str(_origin))
+        except Exception:
+            continue
+        _host = str(_parsed.hostname or "").strip().lower()
+        if not _host.endswith(".netlify.app"):
+            continue
+        _pattern = rf"https://(?:[a-z0-9-]+--)?{re.escape(_host)}"
+        if _pattern in _cors_seen:
+            continue
+        _cors_seen.add(_pattern)
+        _cors_patterns.append(_pattern)
+    _cors_allow_origin_regex = (
+        rf"^(?:{'|'.join(_cors_patterns)})$" if _cors_patterns else None
+    )
+
 # CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_allow_origins or ["http://localhost:5173"],
+    allow_origin_regex=_cors_allow_origin_regex,
+    allow_credentials=("*" not in _cors_allow_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_INTERNAL_API_TOKEN = str(os.getenv("STRATEGY_INTERNAL_API_TOKEN") or "").strip()
+_INTERNAL_PROTECTED_PREFIXES = (
+    "/api/session/",
+    "/api/orchestrator/",
+    "/api/strategies/update",
+    "/api/strategies/toggle",
+)
+_INTERNAL_PUBLIC_ROUTES = {
+    ("GET", "/api/orchestrator/checkpoints"),
+}
+
+
+def _apply_cors_headers_for_error(request: Request, response: JSONResponse) -> JSONResponse:
+    origin = str(request.headers.get("origin") or "").strip()
+    if not origin:
+        return response
+
+    allow_origin: Optional[str] = None
+    if "*" in _cors_allow_origins:
+        allow_origin = "*"
+    elif origin in _cors_allow_origins:
+        allow_origin = origin
+    elif _cors_allow_origin_regex and re.match(_cors_allow_origin_regex, origin):
+        allow_origin = origin
+
+    if not allow_origin:
+        return response
+
+    response.headers["access-control-allow-origin"] = allow_origin
+    if allow_origin != "*":
+        response.headers["access-control-allow-credentials"] = "true"
+    response.headers["vary"] = "Origin"
+    return response
+
+
+@app.middleware("http")
+async def _internal_api_token_guard(request: Request, call_next):
+    if not _INTERNAL_API_TOKEN:
+        return await call_next(request)
+
+    method = str(request.method or "").upper()
+    path = str(request.url.path or "")
+    if method == "OPTIONS":
+        return await call_next(request)
+    if (method, path) in _INTERNAL_PUBLIC_ROUTES:
+        return await call_next(request)
+    if not any(path.startswith(prefix) for prefix in _INTERNAL_PROTECTED_PREFIXES):
+        return await call_next(request)
+
+    supplied = str(request.headers.get("x-internal-token") or "").strip()
+    if supplied != _INTERNAL_API_TOKEN:
+        return _apply_cors_headers_for_error(
+            request,
+            JSONResponse(
+                status_code=403,
+                content={"detail": "Forbidden: internal API token required."},
+            ),
+        )
+    return await call_next(request)
 
 # Strategy engine instance
 engine = StrategyEngine(backtest_api_url="http://localhost:8000")
@@ -125,15 +255,100 @@ async def update_strategy(config: StrategyUpdate):
     
     strat = engine.strategies[strat_name]
     dtm_strat = day_trading_manager.strategies.get(strat_name)
+
+    def _normalize_mode(value: Any) -> Optional[str]:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"global", "custom"}:
+            return normalized
+        return None
+
+    def _normalize_optional_positive(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if parsed <= 0:
+            return None
+        return parsed
     
     updated_fields = {}
     for key, val in config.params.items():
+        if key in {"custom_entry_formula", "custom_exit_formula"}:
+            normalized_formula = str(val or "").strip()
+            try:
+                formula_info = validate_strategy_formula(normalized_formula)
+            except StrategyFormulaValidationError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid {key}: {exc}",
+                ) from exc
+            normalized_formula = str(formula_info.get("normalized", "") or "")
+            setattr(strat, key, normalized_formula)
+            updated_fields[key] = normalized_formula
+            if dtm_strat and hasattr(dtm_strat, key):
+                setattr(dtm_strat, key, normalized_formula)
+            continue
+        if key in {"custom_entry_formula_enabled", "custom_exit_formula_enabled"}:
+            normalized_enabled = bool(val)
+            setattr(strat, key, normalized_enabled)
+            updated_fields[key] = normalized_enabled
+            if dtm_strat and hasattr(dtm_strat, key):
+                setattr(dtm_strat, key, normalized_enabled)
+            continue
         if key == "allowed_regimes" and isinstance(val, list):
             regimes = coerce_regimes(val)
             setattr(strat, "allowed_regimes", regimes)
             updated_fields[key] = [r.value for r in regimes]
             if dtm_strat:
                 setattr(dtm_strat, "allowed_regimes", regimes)
+            continue
+        if key in {"trailing_stop_mode", "exit_mode"}:
+            mode = _normalize_mode(val)
+            if mode is None:
+                continue
+            setattr(strat, "exit_mode", mode)
+            setattr(strat, "trailing_stop_mode", mode)
+            updated_fields["exit_mode"] = mode
+            updated_fields["trailing_stop_mode"] = mode
+            if dtm_strat:
+                setattr(dtm_strat, "exit_mode", mode)
+                setattr(dtm_strat, "trailing_stop_mode", mode)
+            continue
+        if key == "risk_mode":
+            mode = _normalize_mode(val)
+            if mode is None:
+                continue
+            setattr(strat, "risk_mode", mode)
+            updated_fields[key] = mode
+            if dtm_strat:
+                setattr(dtm_strat, "risk_mode", mode)
+            continue
+        if key in {
+            "global_trailing_stop_pct",
+            "global_rr_ratio",
+            "global_atr_stop_multiplier",
+            "global_volume_stop_pct",
+            "global_min_stop_loss_pct",
+        }:
+            normalized_global = _normalize_optional_positive(val)
+            setattr(strat, key, normalized_global)
+            updated_fields[key] = normalized_global
+            if dtm_strat and hasattr(dtm_strat, key):
+                setattr(dtm_strat, key, normalized_global)
+            continue
+        if key == "trailing_stop_pct":
+            try:
+                normalized_trailing = float(val)
+            except (TypeError, ValueError):
+                continue
+            if normalized_trailing <= 0:
+                continue
+            setattr(strat, "trailing_stop_pct", normalized_trailing)
+            updated_fields[key] = normalized_trailing
+            if dtm_strat and hasattr(dtm_strat, "trailing_stop_pct"):
+                setattr(dtm_strat, "trailing_stop_pct", normalized_trailing)
             continue
         # Only update existing attributes and basic numeric/bool/str types
         if hasattr(strat, key) and isinstance(val, (int, float, bool, str, type(None))):
@@ -239,6 +454,60 @@ async def get_all_indicators():
 
 # ============ Session-Based Day Trading API ============
 
+@app.post("/api/session/intrabar_eval")
+async def evaluate_intrabar_slice(bar: BarInput):
+    """
+    Evaluate a 5s intrabar slice side-effect-free without modifying the session state.
+    Returns the layer scores, signal decision, and thresholds.
+    """
+    try:
+        timestamp = datetime.fromisoformat(bar.timestamp.replace('Z', '+00:00'))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid timestamp format: {bar.timestamp}")
+    
+    bar_data = {
+        'open': bar.open,
+        'high': bar.high,
+        'low': bar.low,
+        'close': bar.close,
+        'volume': bar.volume,
+        'vwap': bar.vwap,
+        'l2_delta': bar.l2_delta,
+        'l2_buy_volume': bar.l2_buy_volume,
+        'l2_sell_volume': bar.l2_sell_volume,
+        'l2_volume': bar.l2_volume,
+        'l2_imbalance': bar.l2_imbalance,
+        'l2_bid_depth_total': bar.l2_bid_depth_total,
+        'l2_ask_depth_total': bar.l2_ask_depth_total,
+        'l2_book_pressure': bar.l2_book_pressure,
+        'l2_book_pressure_change': bar.l2_book_pressure_change,
+        'l2_iceberg_buy_count': bar.l2_iceberg_buy_count,
+        'l2_iceberg_sell_count': bar.l2_iceberg_sell_count,
+        'l2_iceberg_bias': bar.l2_iceberg_bias,
+        'l2_quality_flags': bar.l2_quality_flags,
+        'l2_quality': bar.l2_quality,
+        'intrabar_quotes_1s': bar.intrabar_quotes_1s,
+    }
+    
+    result = day_trading_manager.evaluate_intrabar_slice(
+        run_id=bar.run_id,
+        ticker=bar.ticker,
+        timestamp=timestamp,
+        bar_data=bar_data,
+    )
+
+    def _sanitize(obj):
+        if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+            return None
+        if isinstance(obj, dict):
+            return {k: _sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_sanitize(v) for v in obj]
+        return obj
+        
+    return _sanitize(result)
+
+
 @app.post("/api/session/bar")
 async def process_bar(bar: BarInput):
     """
@@ -277,6 +546,8 @@ async def process_bar(bar: BarInput):
         'l2_iceberg_buy_count': bar.l2_iceberg_buy_count,
         'l2_iceberg_sell_count': bar.l2_iceberg_sell_count,
         'l2_iceberg_bias': bar.l2_iceberg_bias,
+        'l2_quality_flags': bar.l2_quality_flags,
+        'l2_quality': bar.l2_quality,
         'intrabar_quotes_1s': bar.intrabar_quotes_1s,
     }
     
@@ -284,7 +555,8 @@ async def process_bar(bar: BarInput):
         run_id=bar.run_id,
         ticker=bar.ticker,
         timestamp=timestamp,
-        bar_data=bar_data
+        bar_data=bar_data,
+        warmup_only=bool(bar.warmup_only),
     )
 
     # Sanitize NaN/Inf values that crash JSON serialization
@@ -406,76 +678,23 @@ async def clear_run_sessions(run_id: str, ticker: Optional[str] = None):
 @app.get("/api/config/trading")
 async def get_trading_config():
     """Get current global trading configuration."""
-    return {
-        "regime_detection_minutes": day_trading_manager.regime_detection_minutes,
-        "regime_refresh_bars": day_trading_manager.regime_refresh_bars,
-        "max_daily_loss": day_trading_manager.max_daily_loss,
-        "max_trades_per_day": day_trading_manager.max_trades_per_day,
-        "trade_cooldown_bars": day_trading_manager.trade_cooldown_bars,
-        "risk_per_trade_pct": day_trading_manager.risk_per_trade_pct,
-        "max_position_notional_pct": day_trading_manager.max_position_notional_pct,
-        "max_fill_participation_rate": day_trading_manager.max_fill_participation_rate,
-        "min_fill_ratio": day_trading_manager.min_fill_ratio,
-        "time_exit_bars": day_trading_manager.time_exit_bars,
-        "enable_partial_take_profit": day_trading_manager.enable_partial_take_profit,
-        "partial_take_profit_rr": day_trading_manager.partial_take_profit_rr,
-        "partial_take_profit_fraction": day_trading_manager.partial_take_profit_fraction,
-        "adverse_flow_exit_enabled": day_trading_manager.adverse_flow_exit_enabled,
-        "adverse_flow_threshold": day_trading_manager.adverse_flow_exit_threshold,
-        "adverse_flow_min_hold_bars": day_trading_manager.adverse_flow_min_hold_bars,
-        "stop_loss_mode": day_trading_manager.stop_loss_mode,
-        "fixed_stop_loss_pct": day_trading_manager.fixed_stop_loss_pct,
-    }
+    payload = read_trading_limits(day_trading_manager)
+    payload.update(read_global_trading_config(day_trading_manager))
+    return payload
 
 
 @app.post("/api/config/trading")
-async def update_trading_config(config: TradingConfig):
+async def update_trading_config(config: TradingConfigModel):
     """Update global trading configuration."""
-    day_trading_manager.regime_detection_minutes = config.regime_detection_minutes
-    day_trading_manager.regime_refresh_bars = max(3, int(config.regime_refresh_bars))
-    day_trading_manager.max_daily_loss = config.max_daily_loss
-    day_trading_manager.max_trades_per_day = config.max_trades_per_day
-    day_trading_manager.trade_cooldown_bars = config.trade_cooldown_bars
-    day_trading_manager.risk_per_trade_pct = max(0.1, float(config.risk_per_trade_pct))
-    day_trading_manager.max_position_notional_pct = max(1.0, float(config.max_position_notional_pct))
-    day_trading_manager.max_fill_participation_rate = min(
-        1.0, max(0.01, float(config.max_fill_participation_rate))
-    )
-    day_trading_manager.min_fill_ratio = min(1.0, max(0.01, float(config.min_fill_ratio)))
-    day_trading_manager.time_exit_bars = max(1, int(config.time_exit_bars))
-    day_trading_manager.enable_partial_take_profit = bool(config.enable_partial_take_profit)
-    day_trading_manager.partial_take_profit_rr = max(0.25, float(config.partial_take_profit_rr))
-    day_trading_manager.partial_take_profit_fraction = min(
-        0.95, max(0.05, float(config.partial_take_profit_fraction))
-    )
-    day_trading_manager.adverse_flow_exit_enabled = bool(config.adverse_flow_exit_enabled)
-    day_trading_manager.adverse_flow_exit_threshold = max(0.02, float(config.adverse_flow_threshold))
-    day_trading_manager.adverse_flow_min_hold_bars = max(1, int(config.adverse_flow_min_hold_bars))
-    day_trading_manager.stop_loss_mode = day_trading_manager._normalize_stop_loss_mode(config.stop_loss_mode)
-    day_trading_manager.fixed_stop_loss_pct = max(0.0, float(config.fixed_stop_loss_pct))
-    
+    canonical = TradingConfig.from_dict(config.model_dump())
+    apply_trading_limits(day_trading_manager, config.model_dump())
+    apply_global_trading_config(day_trading_manager, canonical)
+
+    response_config = read_trading_limits(day_trading_manager)
+    response_config.update(canonical.to_session_params())
     return {
         "message": "Trading configuration updated",
-        "config": {
-            "regime_detection_minutes": config.regime_detection_minutes,
-            "regime_refresh_bars": day_trading_manager.regime_refresh_bars,
-            "max_daily_loss": config.max_daily_loss,
-            "max_trades_per_day": config.max_trades_per_day,
-            "trade_cooldown_bars": config.trade_cooldown_bars,
-            "risk_per_trade_pct": day_trading_manager.risk_per_trade_pct,
-            "max_position_notional_pct": day_trading_manager.max_position_notional_pct,
-            "max_fill_participation_rate": day_trading_manager.max_fill_participation_rate,
-            "min_fill_ratio": day_trading_manager.min_fill_ratio,
-            "time_exit_bars": day_trading_manager.time_exit_bars,
-            "enable_partial_take_profit": day_trading_manager.enable_partial_take_profit,
-            "partial_take_profit_rr": day_trading_manager.partial_take_profit_rr,
-            "partial_take_profit_fraction": day_trading_manager.partial_take_profit_fraction,
-            "adverse_flow_exit_enabled": day_trading_manager.adverse_flow_exit_enabled,
-            "adverse_flow_threshold": day_trading_manager.adverse_flow_exit_threshold,
-            "adverse_flow_min_hold_bars": day_trading_manager.adverse_flow_min_hold_bars,
-            "stop_loss_mode": day_trading_manager.stop_loss_mode,
-            "fixed_stop_loss_pct": day_trading_manager.fixed_stop_loss_pct,
-        }
+        "config": response_config,
     }
 
 
@@ -484,6 +703,7 @@ async def configure_session(
     run_id: str,
     ticker: str,
     date: str,
+    request: Request,
     regime_detection_minutes: int = 15,
     regime_refresh_bars: int = 12,
     account_size_usd: float = 10_000.0,
@@ -494,10 +714,55 @@ async def configure_session(
     enable_partial_take_profit: bool = True,
     partial_take_profit_rr: float = 1.0,
     partial_take_profit_fraction: float = 0.5,
+    trailing_activation_pct: float = 0.15,
+    break_even_buffer_pct: float = 0.03,
+    break_even_min_hold_bars: int = 3,
+    break_even_activation_min_mfe_pct: float = 0.25,
+    break_even_activation_min_r: float = 0.60,
+    break_even_activation_min_r_trending_5m: float = 0.90,
+    break_even_activation_min_r_choppy_5m: float = 0.60,
+    break_even_activation_use_levels: bool = True,
+    break_even_activation_use_l2: bool = True,
+    break_even_level_buffer_pct: float = 0.02,
+    break_even_level_max_distance_pct: float = 0.60,
+    break_even_level_min_confluence: int = 2,
+    break_even_level_min_tests: int = 1,
+    break_even_l2_signed_aggression_min: float = 0.12,
+    break_even_l2_imbalance_min: float = 0.15,
+    break_even_l2_book_pressure_min: float = 0.10,
+    break_even_l2_spread_bps_max: float = 12.0,
+    break_even_costs_pct: float = 0.03,
+    break_even_min_buffer_pct: float = 0.05,
+    break_even_atr_buffer_k: float = 0.10,
+    break_even_5m_atr_buffer_k: float = 0.10,
+    break_even_tick_size: float = 0.01,
+    break_even_min_tick_buffer: int = 1,
+    break_even_anti_spike_bars: int = 1,
+    break_even_anti_spike_hits_required: int = 2,
+    break_even_anti_spike_require_close_beyond: bool = True,
+    break_even_5m_no_go_proximity_pct: float = 0.10,
+    break_even_5m_mfe_atr_factor: float = 0.15,
+    break_even_5m_l2_bias_threshold: float = 0.10,
+    break_even_5m_l2_bias_tighten_factor: float = 0.85,
+    break_even_movement_formula_enabled: bool = False,
+    break_even_movement_formula: str = "",
+    break_even_proof_formula_enabled: bool = False,
+    break_even_proof_formula: str = "",
+    break_even_activation_formula_enabled: bool = False,
+    break_even_activation_formula: str = "",
+    break_even_trailing_handoff_formula_enabled: bool = False,
+    break_even_trailing_handoff_formula: str = "",
+    trailing_enabled_in_choppy: bool = False,
     time_exit_bars: int = 40,
+    time_exit_formula_enabled: bool = False,
+    time_exit_formula: str = "",
     adverse_flow_exit_enabled: bool = True,
     adverse_flow_threshold: float = 0.12,
     adverse_flow_min_hold_bars: int = 3,
+    adverse_flow_consistency_threshold: float = 0.45,
+    adverse_book_pressure_threshold: float = 0.15,
+    adverse_flow_exit_formula_enabled: bool = False,
+    adverse_flow_exit_formula: str = "",
     stop_loss_mode: str = "strategy",
     fixed_stop_loss_pct: float = 0.0,
     l2_confirm_enabled: bool = False,
@@ -508,9 +773,105 @@ async def configure_session(
     l2_min_participation_ratio: float = 0.0,
     l2_min_directional_consistency: float = 0.0,
     l2_min_signed_aggression: float = 0.0,
+    tcbbo_gate_enabled: bool = False,
+    tcbbo_min_net_premium: float = 0.0,
+    tcbbo_sweep_boost: float = 5.0,
+    tcbbo_lookback_bars: int = 5,
+    intraday_levels_enabled: bool = True,
+    intraday_levels_swing_left_bars: int = 2,
+    intraday_levels_swing_right_bars: int = 2,
+    intraday_levels_test_tolerance_pct: float = 0.08,
+    intraday_levels_break_tolerance_pct: float = 0.05,
+    intraday_levels_breakout_volume_lookback: int = 20,
+    intraday_levels_breakout_volume_multiplier: float = 1.2,
+    intraday_levels_volume_profile_bin_size_pct: float = 0.05,
+    intraday_levels_value_area_pct: float = 0.70,
+    intraday_levels_entry_quality_enabled: bool = True,
+    intraday_levels_min_levels_for_context: int = 2,
+    intraday_levels_entry_tolerance_pct: float = 0.10,
+    intraday_levels_break_cooldown_bars: int = 6,
+    intraday_levels_rotation_max_tests: int = 2,
+    intraday_levels_rotation_volume_max_ratio: float = 0.95,
+    intraday_levels_recent_bounce_lookback_bars: int = 6,
+    intraday_levels_require_recent_bounce_for_mean_reversion: bool = True,
+    intraday_levels_momentum_break_max_age_bars: int = 3,
+    intraday_levels_momentum_min_room_pct: float = 0.30,
+    intraday_levels_momentum_min_broken_ratio: float = 0.30,
+    intraday_levels_min_confluence_score: int = 2,
+    intraday_levels_memory_enabled: bool = True,
+    intraday_levels_memory_min_tests: int = 2,
+    intraday_levels_memory_max_age_days: int = 5,
+    intraday_levels_memory_decay_after_days: int = 2,
+    intraday_levels_memory_decay_weight: float = 0.50,
+    intraday_levels_memory_max_levels: int = 12,
+    intraday_levels_opening_range_enabled: bool = True,
+    intraday_levels_opening_range_minutes: int = 30,
+    intraday_levels_opening_range_break_tolerance_pct: float = 0.05,
+    intraday_levels_poc_migration_enabled: bool = True,
+    intraday_levels_poc_migration_interval_bars: int = 30,
+    intraday_levels_poc_migration_trend_threshold_pct: float = 0.20,
+    intraday_levels_poc_migration_range_threshold_pct: float = 0.10,
+    intraday_levels_composite_profile_enabled: bool = True,
+    intraday_levels_composite_profile_days: int = 3,
+    intraday_levels_composite_profile_current_day_weight: float = 1.0,
+    intraday_levels_spike_detection_enabled: bool = True,
+    intraday_levels_spike_min_wick_ratio: float = 0.60,
+    intraday_levels_prior_day_anchors_enabled: bool = True,
+    intraday_levels_gap_analysis_enabled: bool = True,
+    intraday_levels_gap_min_pct: float = 0.30,
+    intraday_levels_gap_momentum_threshold_pct: float = 2.0,
+    intraday_levels_rvol_filter_enabled: bool = True,
+    intraday_levels_rvol_lookback_bars: int = 20,
+    intraday_levels_rvol_min_threshold: float = 0.80,
+    intraday_levels_rvol_strong_threshold: float = 1.50,
+    intraday_levels_adaptive_window_enabled: bool = True,
+    intraday_levels_adaptive_window_min_bars: int = 6,
+    intraday_levels_adaptive_window_rvol_threshold: float = 1.0,
+    intraday_levels_adaptive_window_atr_ratio_max: float = 1.5,
+    intraday_levels_micro_confirmation_enabled: bool = False,
+    intraday_levels_micro_confirmation_bars: int = 2,
+    intraday_levels_micro_confirmation_disable_for_sweep: bool = False,
+    intraday_levels_micro_confirmation_sweep_bars: int = 0,
+    intraday_levels_micro_confirmation_require_intrabar: bool = False,
+    intraday_levels_micro_confirmation_intrabar_window_seconds: int = 5,
+    intraday_levels_micro_confirmation_intrabar_min_coverage_points: int = 3,
+    intraday_levels_micro_confirmation_intrabar_min_move_pct: float = 0.02,
+    intraday_levels_micro_confirmation_intrabar_min_push_ratio: float = 0.10,
+    intraday_levels_micro_confirmation_intrabar_max_spread_bps: float = 12.0,
+    intraday_levels_confluence_sizing_enabled: bool = False,
+    liquidity_sweep_detection_enabled: bool = False,
+    sweep_min_aggression_z: float = -2.0,
+    sweep_min_book_pressure_z: float = 1.5,
+    sweep_max_price_change_pct: float = 0.05,
+    sweep_atr_buffer_multiplier: float = 0.5,
+    context_aware_risk_enabled: bool = False,
+    context_risk_sl_buffer_pct: float = 0.03,
+    context_risk_min_sl_pct: float = 0.30,
+    context_risk_min_room_pct: float = 0.15,
+    context_risk_min_effective_rr: float = 0.80,
+    context_risk_trailing_tighten_zone: float = 0.20,
+    context_risk_trailing_tighten_factor: float = 0.50,
+    context_risk_level_trail_enabled: bool = True,
+    context_risk_max_anchor_search_pct: float = 1.5,
+    context_risk_min_level_tests_for_sl: int = 1,
     cold_start_each_day: bool = False,
     strategy_selection_mode: str = "adaptive_top_n",
     max_active_strategies: int = 3,
+    momentum_diversification_json: str = "",
+    max_daily_trades: Optional[int] = None,
+    mu_choppy_hard_block_enabled: Optional[bool] = None,
+    regime_filter_json: str = "",
+    micro_confirmation_mode: str = "consecutive_close",
+    micro_confirmation_volume_delta_min_pct: float = 0.60,
+    weak_l2_fast_break_even_enabled: bool = False,
+    weak_l2_aggression_threshold: float = 0.05,
+    weak_l2_break_even_min_hold_bars: int = 2,
+    ev_relaxation_enabled: bool = False,
+    ev_relaxation_threshold: float = 10.0,
+    ev_relaxation_factor: float = 0.50,
+    intraday_levels_bounce_conflict_buffer_bars: int = 0,
+    orchestrator_strategy_weight: float = 0.6,
+    orchestrator_strategy_only_threshold: float = 0.0,
 ):
     """Configure session parameters before processing."""
     session = day_trading_manager.get_or_create_session(
@@ -519,66 +880,106 @@ async def configure_session(
         date=date,
         regime_detection_minutes=regime_detection_minutes
     )
-    session.regime_detection_minutes = regime_detection_minutes
-    session.regime_refresh_bars = max(3, int(regime_refresh_bars))
-    day_trading_manager.regime_refresh_bars = max(3, int(regime_refresh_bars))
-    session.account_size_usd = account_size_usd
-    session.risk_per_trade_pct = max(0.1, float(risk_per_trade_pct))
-    session.max_position_notional_pct = max(1.0, float(max_position_notional_pct))
-    session.max_fill_participation_rate = min(1.0, max(0.01, float(max_fill_participation_rate)))
-    session.min_fill_ratio = min(1.0, max(0.01, float(min_fill_ratio)))
-    day_trading_manager.max_fill_participation_rate = session.max_fill_participation_rate
-    day_trading_manager.min_fill_ratio = session.min_fill_ratio
-    session.enable_partial_take_profit = bool(enable_partial_take_profit)
-    session.partial_take_profit_rr = max(0.25, float(partial_take_profit_rr))
-    session.partial_take_profit_fraction = min(0.95, max(0.05, float(partial_take_profit_fraction)))
-    session.time_exit_bars = max(1, int(time_exit_bars))
-    session.adverse_flow_exit_enabled = bool(adverse_flow_exit_enabled)
-    session.adverse_flow_threshold = max(0.02, float(adverse_flow_threshold))
-    session.adverse_flow_min_hold_bars = max(1, int(adverse_flow_min_hold_bars))
-    session.stop_loss_mode = day_trading_manager._normalize_stop_loss_mode(stop_loss_mode)
-    session.fixed_stop_loss_pct = max(0.0, float(fixed_stop_loss_pct))
-    session.strategy_selection_mode = day_trading_manager._normalize_strategy_selection_mode(
-        strategy_selection_mode
+    query_param_keys = {str(key) for key in request.query_params.keys()}
+    body_payload: Dict[str, Any] = {}
+    try:
+        parsed_body = await request.json()
+    except Exception:
+        parsed_body = None
+    if isinstance(parsed_body, dict):
+        body_payload = parsed_body
+
+    config_payload = build_session_config_payload(dict(locals()))
+    if body_payload:
+        merge_body_payload(
+            config_payload=config_payload,
+            body_payload=body_payload,
+            query_param_keys=query_param_keys,
+        )
+        momentum_diversification_json = resolve_json_string_override(
+            override_key="momentum_diversification_json",
+            override_value=momentum_diversification_json,
+            body_payload=body_payload,
+            query_param_keys=query_param_keys,
+        )
+        regime_filter_json = resolve_json_string_override(
+            override_key="regime_filter_json",
+            override_value=regime_filter_json,
+            body_payload=body_payload,
+            query_param_keys=query_param_keys,
+        )
+        max_daily_trades = resolve_optional_override(
+            override_key="max_daily_trades",
+            override_value=max_daily_trades,
+            body_payload=body_payload,
+            query_param_keys=query_param_keys,
+        )
+        mu_choppy_hard_block_enabled = resolve_optional_override(
+            override_key="mu_choppy_hard_block_enabled",
+            override_value=mu_choppy_hard_block_enabled,
+            body_payload=body_payload,
+            query_param_keys=query_param_keys,
+            copy_null=True,
+        )
+
+    try:
+        momentum_diversification_payload = parse_momentum_diversification_payload(
+            momentum_diversification_json=momentum_diversification_json,
+            body_payload=body_payload,
+            query_param_keys=query_param_keys,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if momentum_diversification_payload is not None:
+        config_payload["momentum_diversification"] = momentum_diversification_payload
+
+    try:
+        regime_filter_payload = parse_regime_filter_payload(
+            regime_filter_json=regime_filter_json,
+            body_payload=body_payload,
+            query_param_keys=query_param_keys,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if regime_filter_payload is not None:
+        config_payload["regime_filter"] = list(regime_filter_payload)
+    try:
+        config_payload.update(normalize_runtime_exit_formula_fields(config_payload))
+        canonical = TradingConfig.from_dict(config_payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    day_trading_manager._apply_trading_config_to_session(
+        session,
+        canonical,
+        normalize_momentum=(momentum_diversification_payload is not None),
     )
-    session.max_active_strategies = day_trading_manager._normalize_max_active_strategies(
-        max_active_strategies, default=3
-    )
+    day_trading_manager.regime_refresh_bars = canonical.regime_refresh_bars
+    day_trading_manager.max_fill_participation_rate = canonical.max_fill_participation_rate
+    day_trading_manager.min_fill_ratio = canonical.min_fill_ratio
+
     day_trading_manager.set_run_defaults(
         run_id=run_id,
         ticker=ticker,
-        regime_detection_minutes=regime_detection_minutes,
-        regime_refresh_bars=regime_refresh_bars,
-        account_size_usd=account_size_usd,
-        risk_per_trade_pct=risk_per_trade_pct,
-        max_position_notional_pct=max_position_notional_pct,
-        max_fill_participation_rate=max_fill_participation_rate,
-        min_fill_ratio=min_fill_ratio,
-        enable_partial_take_profit=enable_partial_take_profit,
-        partial_take_profit_rr=partial_take_profit_rr,
-        partial_take_profit_fraction=partial_take_profit_fraction,
-        time_exit_bars=time_exit_bars,
-        adverse_flow_exit_enabled=adverse_flow_exit_enabled,
-        adverse_flow_threshold=adverse_flow_threshold,
-        adverse_flow_min_hold_bars=adverse_flow_min_hold_bars,
-        stop_loss_mode=stop_loss_mode,
-        fixed_stop_loss_pct=fixed_stop_loss_pct,
-        l2_confirm_enabled=l2_confirm_enabled,
-        l2_min_delta=l2_min_delta,
-        l2_min_imbalance=l2_min_imbalance,
-        l2_min_iceberg_bias=l2_min_iceberg_bias,
-        l2_lookback_bars=l2_lookback_bars,
-        l2_min_participation_ratio=l2_min_participation_ratio,
-        l2_min_directional_consistency=l2_min_directional_consistency,
-        l2_min_signed_aggression=l2_min_signed_aggression,
-        cold_start_each_day=cold_start_each_day,
-        strategy_selection_mode=strategy_selection_mode,
-        max_active_strategies=max_active_strategies,
+        trading_config=canonical,
+    )
+    session.max_daily_trades_override = (
+        int(max_daily_trades) if max_daily_trades is not None else None
+    )
+    session.mu_choppy_hard_block_enabled_override = (
+        bool(mu_choppy_hard_block_enabled)
+        if mu_choppy_hard_block_enabled is not None
+        else None
     )
     
     return {
         "message": "Session configured",
-        "session": session.to_dict()
+        "session": session.to_dict(),
+        "overrides": {
+            "max_daily_trades": session.max_daily_trades_override,
+            "mu_choppy_hard_block_enabled": session.mu_choppy_hard_block_enabled_override,
+        },
     }
 
 
@@ -625,6 +1026,7 @@ async def get_orchestrator_config():
     if not orch:
         return {"status": "not_initialized"}
     cfg = orch.config
+    combiner = orch.combiner if hasattr(orch, 'combiner') else None
     return {
         "use_evidence_engine": cfg.use_evidence_engine,
         "use_adaptive_regime": cfg.use_adaptive_regime,
@@ -635,6 +1037,12 @@ async def get_orchestrator_config():
         "min_confirming_sources": cfg.min_confirming_sources,
         "base_threshold": cfg.base_threshold,
         "base_risk_pct": cfg.base_risk_pct,
+        "combiner_base_threshold": combiner._base_threshold if combiner else None,
+        "combiner_min_confirming": combiner._min_confirming if combiner else None,
+        "combiner_min_margin": combiner._min_margin if combiner else None,
+        "combiner_single_source_margin": combiner._single_source_margin if combiner else None,
+        "strategy_weight": cfg.strategy_weight,
+        "strategy_only_threshold": cfg.strategy_only_threshold,
     }
 
 
@@ -652,11 +1060,37 @@ async def update_orchestrator_config(body: Dict[str, Any]):
         if flag in body:
             setattr(cfg, flag, bool(body[flag]))
             updated[flag] = bool(body[flag])
-    for param in ('min_confirming_sources', 'base_threshold', 'base_risk_pct'):
+    for param in ('min_confirming_sources', 'base_threshold', 'base_risk_pct',
+                   'min_margin_over_threshold', 'single_source_min_margin',
+                   'strategy_weight', 'strategy_only_threshold'):
         if param in body:
             val = float(body[param]) if param != 'min_confirming_sources' else int(body[param])
             setattr(cfg, param, val)
             updated[param] = val
+
+    # Propagate threshold/margin changes to sub-components so they take effect
+    # immediately (the config dataclass alone is not re-read at runtime).
+    if any(k in body for k in ('base_threshold', 'min_confirming_sources',
+                                'min_margin_over_threshold', 'single_source_min_margin')):
+        if hasattr(orch, 'combiner') and orch.combiner is not None:
+            if 'base_threshold' in body:
+                orch.combiner._base_threshold = float(body['base_threshold'])
+            if 'min_confirming_sources' in body:
+                orch.combiner._min_confirming = int(body['min_confirming_sources'])
+            if 'min_margin_over_threshold' in body:
+                orch.combiner._min_margin = float(body['min_margin_over_threshold'])
+            if 'single_source_min_margin' in body:
+                orch.combiner._single_source_margin = float(body['single_source_min_margin'])
+        if hasattr(orch, 'evidence_engine') and orch.evidence_engine is not None:
+            if 'base_threshold' in body:
+                orch.evidence_engine._base_threshold = float(body['base_threshold'])
+            if 'min_confirming_sources' in body:
+                orch.evidence_engine._min_confirming = int(body['min_confirming_sources'])
+    # Propagate orchestrator weight changes to evidence engine
+    if 'strategy_only_threshold' in body:
+        if hasattr(orch, 'evidence_engine') and orch.evidence_engine is not None:
+            orch.evidence_engine._strategy_only_threshold = float(body['strategy_only_threshold'])
+
     return {"message": "Orchestrator config updated", "updated": updated}
 
 
@@ -740,10 +1174,14 @@ from fastapi import WebSocket, WebSocketDisconnect
 import asyncio
 
 connected_clients: List[WebSocket] = []
+MAX_WS_CLIENTS = max(1, int(os.getenv("STRATEGY_MAX_WS_CLIENTS", "120")))
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    if len(connected_clients) >= MAX_WS_CLIENTS:
+        await websocket.close(code=1013, reason="Too many websocket clients")
+        return
     await websocket.accept()
     connected_clients.append(websocket)
     
@@ -778,7 +1216,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     await asyncio.sleep(0.1)  # Small delay for visualization
                     
     except WebSocketDisconnect:
-        connected_clients.remove(websocket)
+        if websocket in connected_clients:
+            connected_clients.remove(websocket)
 
 
 # ============ Main ============

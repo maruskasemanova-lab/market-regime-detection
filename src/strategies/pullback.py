@@ -97,6 +97,8 @@ class PullbackStrategy(BaseStrategy):
         avg_volume = volume_stats["avg"]
         current_volume = volume_stats["current"]
         volume_ratio = volume_stats["ratio"]
+        effective_volume_stop_pct = self.get_effective_volume_stop_pct() or self.volume_stop_pct
+        effective_rr_ratio = self.get_effective_rr_ratio() or self.rr_ratio
         
         signal = None
         confidence = 50.0
@@ -145,11 +147,18 @@ class PullbackStrategy(BaseStrategy):
                     if confidence >= self.min_confidence:
                         stop_loss = min(lows[-5:], default=current_price * 0.99)
                         # Ensure stop is not too far
-                        max_stop_dist = current_price * (self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio) / 100)
+                        max_stop_dist = current_price * (
+                            self.volume_adjusted_pct(effective_volume_stop_pct, volume_ratio) / 100
+                        )
                         if current_price - stop_loss > max_stop_dist:
                             stop_loss = current_price - max_stop_dist
                             
-                        take_profit = self.calculate_take_profit(current_price, stop_loss, self.rr_ratio, 'long')
+                        take_profit = self.calculate_take_profit(
+                            current_price,
+                            stop_loss,
+                            effective_rr_ratio,
+                            'long',
+                        )
                         
                         signal = Signal(
                             strategy_name=self.name,
@@ -160,7 +169,7 @@ class PullbackStrategy(BaseStrategy):
                             stop_loss=stop_loss,
                             take_profit=take_profit,
                             trailing_stop=True,
-                            trailing_stop_pct=self.trailing_stop_pct,
+                            trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                             reasoning=" | ".join(reasoning_parts),
                             metadata={
                                 'vwap': vwap_val,
@@ -203,11 +212,18 @@ class PullbackStrategy(BaseStrategy):
                     if confidence >= self.min_confidence:
                         stop_loss = max(highs[-5:], default=current_price * 1.01)
                         # Ensure stop is not too far
-                        max_stop_dist = current_price * (self.volume_adjusted_pct(self.volume_stop_pct, volume_ratio) / 100)
+                        max_stop_dist = current_price * (
+                            self.volume_adjusted_pct(effective_volume_stop_pct, volume_ratio) / 100
+                        )
                         if stop_loss - current_price > max_stop_dist:
                             stop_loss = current_price + max_stop_dist
 
-                        take_profit = self.calculate_take_profit(current_price, stop_loss, self.rr_ratio, 'short')
+                        take_profit = self.calculate_take_profit(
+                            current_price,
+                            stop_loss,
+                            effective_rr_ratio,
+                            'short',
+                        )
                         
                         signal = Signal(
                             strategy_name=self.name,
@@ -218,7 +234,7 @@ class PullbackStrategy(BaseStrategy):
                             stop_loss=stop_loss,
                             take_profit=take_profit,
                             trailing_stop=True,
-                            trailing_stop_pct=self.trailing_stop_pct,
+                            trailing_stop_pct=self.get_effective_trailing_stop_pct(),
                             reasoning=" | ".join(reasoning_parts),
                             metadata={
                                 'vwap': vwap_val,

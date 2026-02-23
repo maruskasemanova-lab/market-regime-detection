@@ -123,6 +123,9 @@ class TestFeatureStore:
         assert 'ema_fast' in legacy
         assert 'rsi' in legacy
         assert 'atr' in legacy
+        assert 'volume_pct_rank' in legacy
+        assert 'tf5_trend_slope' in legacy
+        assert 'tf15_rsi' in legacy
         assert 'order_flow' in legacy
         assert '_feature_vector' in legacy
 
@@ -168,3 +171,72 @@ class TestFeatureStore:
         assert isinstance(fv.adx_14, float), f"Expected float, got {type(fv.adx_14)}"
         assert fv.adx_14 > 0, f"Expected positive ADX for trending prices, got {fv.adx_14}"
 
+    def test_trend_efficiency_uses_multi_bar_directional_metric(self):
+        store = FeatureStore()
+        # Build a persistent uptrend.
+        for i in range(25):
+            price = 100.0 + i * 0.35
+            fv = store.update(_make_bar(price, open_=price - 0.20, high=price + 0.30, low=price - 0.30))
+        baseline_eff = fv.trend_efficiency
+
+        # Insert one near-doji bar; multi-bar efficiency should stay elevated.
+        doji_close = 100.0 + 25 * 0.35
+        fv_after_doji = store.update(
+            _make_bar(
+                doji_close,
+                open_=doji_close,
+                high=doji_close + 0.45,
+                low=doji_close - 0.45,
+            )
+        )
+        assert baseline_eff > 0.6
+        assert fv_after_doji.trend_efficiency > 0.5
+
+    def test_flow_score_is_scale_invariant_across_l2_magnitude(self):
+        store_base = FeatureStore()
+        store_scaled = FeatureStore()
+        fv_base = None
+        fv_scaled = None
+        for i in range(30):
+            close = 100.0 + i * 0.08
+            base_kwargs = {
+                "l2_delta": 120.0 + (i % 3) * 15.0,
+                "l2_volume": 3_200.0 + (i % 4) * 120.0,
+                "l2_imbalance": 0.11,
+                "l2_book_pressure": 0.06,
+            }
+            scaled_kwargs = {
+                "l2_delta": base_kwargs["l2_delta"] * 100.0,
+                "l2_volume": base_kwargs["l2_volume"] * 100.0,
+                "l2_imbalance": base_kwargs["l2_imbalance"],
+                "l2_book_pressure": base_kwargs["l2_book_pressure"],
+            }
+            fv_base = store_base.update(_make_bar(close, volume=15_000.0, **base_kwargs))
+            fv_scaled = store_scaled.update(_make_bar(close, volume=1_500_000.0, **scaled_kwargs))
+
+        assert fv_base is not None and fv_scaled is not None
+        assert abs(fv_base.l2_flow_score - fv_scaled.l2_flow_score) < 6.0
+
+    def test_flow_score_includes_vwap_execution_component(self):
+        store_near_vwap = FeatureStore()
+        store_far_vwap = FeatureStore()
+        fv_near = None
+        fv_far = None
+
+        for i in range(30):
+            close = 100.0 + i * 0.08
+            kwargs = {
+                "l2_delta": 110.0 + (i % 3) * 18.0,
+                "l2_volume": 3_000.0 + (i % 4) * 140.0,
+                "l2_imbalance": 0.10,
+                "l2_book_pressure": 0.05,
+            }
+            fv_near = store_near_vwap.update(
+                _make_bar(close, volume=16_000.0, vwap=close, **kwargs)
+            )
+            fv_far = store_far_vwap.update(
+                _make_bar(close, volume=16_000.0, vwap=close * 0.95, **kwargs)
+            )
+
+        assert fv_near is not None and fv_far is not None
+        assert fv_near.l2_flow_score > fv_far.l2_flow_score

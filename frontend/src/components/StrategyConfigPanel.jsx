@@ -6,7 +6,7 @@ function StrategyConfigPanel({ strategies, tradingConfig, onUpdateStrategy, onUp
     regime_detection_minutes: 60,
     max_daily_loss: 300,
     max_trades_per_day: 3,
-    trade_cooldown_bars: 15
+    trade_cooldown_bars: 2
   });
   const [expandedStrategy, setExpandedStrategy] = useState(null);
   const [saving, setSaving] = useState(false);

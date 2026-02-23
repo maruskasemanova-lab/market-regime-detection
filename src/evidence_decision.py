@@ -72,8 +72,6 @@ class EvidenceDecisionEngine:
         edge_monitor: Optional[EdgeMonitor] = None,
         min_confirming_sources: int = 2,
         base_threshold: float = 55.0,
-        # Legacy compatibility
-        pattern_weight: float = 0.4,
         strategy_weight: float = 0.6,
         strategy_only_threshold: float = 0.0,
     ):
@@ -86,7 +84,6 @@ class EvidenceDecisionEngine:
         self._min_confirming = min_confirming_sources
         self._base_threshold = base_threshold
         # Legacy fields kept for schema compatibility.
-        self._pattern_weight = 0.0
         self._strategy_weight = 1.0
         self._strategy_only_threshold = strategy_only_threshold
 
@@ -116,14 +113,11 @@ class EvidenceDecisionEngine:
         """
         result = DecisionResult(
             threshold=self._base_threshold,
-            pattern_threshold=self._base_threshold,
             trade_gate_threshold=self._base_threshold,
         )
 
         evidence_sources: List[EvidenceSource] = []
         calibrated_signals: List[CalibratedSignal] = []
-
-        result.patterns = []
 
         # ── Evidence 1: Strategy Signals ──────────────────────────────
         confirming_signals: List[Signal] = []
@@ -254,6 +248,7 @@ class EvidenceDecisionEngine:
         regime_conf = regime_state.confidence if regime_state else 0.5
         transition_vel = regime_state.transition_velocity if regime_state else 0.0
         is_trans = regime_state.is_transition if regime_state else False
+        regime_age_bars = regime_state.bar_index if regime_state else None
         te = feature_vector.trend_efficiency if feature_vector else None
 
         ensemble = self.combiner.combine(
@@ -264,6 +259,7 @@ class EvidenceDecisionEngine:
             transition_velocity=transition_vel,
             trend_efficiency=te,
             is_transition=is_trans,
+            regime_age_bars=regime_age_bars,
         )
 
         # ── Map to DecisionResult ─────────────────────────────────────
@@ -279,11 +275,6 @@ class EvidenceDecisionEngine:
             f"transition_vel={transition_vel:.2f}, "
             f"is_trans={is_trans}, te={te_str})"
         )
-
-        # Pattern-related fields are intentionally disabled in evidence mode.
-        result.pattern_confirmation = False
-        result.primary_pattern = None
-        result.pattern_score = 0.0
 
         # ── Execute Decision ──────────────────────────────────────────
         no_aligned_strategy_signal = False
@@ -411,30 +402,41 @@ class EvidenceDecisionEngine:
     def _extract_l2_evidence(
         self, fv: FeatureVector,
     ) -> List[EvidenceSource]:
-        """Extract evidence from L2 order flow."""
+        """Extract evidence from L2 order flow.
+
+        Uses z-score-based thresholds when available (adapts to current market
+        conditions automatically). Falls back to static thresholds when z-scores
+        are not warmed up (value == 0.0 with non-zero raw value).
+        """
         evidence = []
 
-        # Directional aggression
-        if abs(fv.l2_signed_aggression) > 0.06:
+        # Directional aggression: use z-score threshold when available
+        agg_z = abs(fv.l2_aggression_z)
+        agg_raw = abs(fv.l2_signed_aggression)
+        # Z-score available and warmed up: use adaptive threshold
+        agg_fires = (agg_z > 1.0) if (agg_z > 0 or agg_raw == 0) else (agg_raw > 0.06)
+        if agg_fires:
             flow_dir = 'bullish' if fv.l2_signed_aggression > 0 else 'bearish'
-            agg_strength = min(80, 50 + abs(fv.l2_aggression_z) * 10)
+            agg_strength = min(80, 50 + agg_z * 10)
             evidence.append(EvidenceSource(
                 source_type='l2_flow', source_name='aggression',
                 direction=flow_dir, strength=agg_strength,
-                calibrated=min(0.7, 0.4 + abs(fv.l2_aggression_z) * 0.08),
+                calibrated=min(0.7, 0.4 + agg_z * 0.08),
                 reasoning=f"L2 aggression={fv.l2_signed_aggression:.3f} z={fv.l2_aggression_z:.1f}",
             ))
 
-        # Delta divergence (flow vs price disagreement → reversal signal)
-        if abs(fv.l2_delta_price_divergence) > 0.5:
-            # Divergence: flow says one thing, price says another → expect reversal toward flow
+        # Delta divergence: use z-score threshold when available
+        div_z = abs(getattr(fv, 'l2_divergence_z', 0.0) or 0.0)
+        div_raw = abs(fv.l2_delta_price_divergence)
+        div_fires = (div_z > 1.2) if (div_z > 0 or div_raw == 0) else (div_raw > 0.5)
+        if div_fires:
             div_dir = 'bullish' if fv.l2_delta_price_divergence > 0 else 'bearish'
-            div_strength = min(75, 45 + abs(fv.l2_delta_price_divergence) * 12)
+            div_strength = min(75, 45 + div_raw * 12)
             evidence.append(EvidenceSource(
                 source_type='l2_flow', source_name='delta_divergence',
                 direction=div_dir, strength=div_strength,
-                calibrated=min(0.65, 0.35 + abs(fv.l2_delta_price_divergence) * 0.06),
-                reasoning=f"L2 delta-price divergence={fv.l2_delta_price_divergence:.2f}",
+                calibrated=min(0.65, 0.35 + div_raw * 0.06),
+                reasoning=f"L2 delta-price divergence={fv.l2_delta_price_divergence:.2f} z={div_z:.1f}",
             ))
 
         # Absorption (price absorbed, flow neutral → potential reversal)
@@ -510,7 +512,6 @@ class EvidenceDecisionEngine:
     ) -> Dict[str, Any]:
         """Build layer_scores dict for legacy compatibility."""
         return {
-            'pattern_score': round(result.pattern_score, 1),
             'strategy_score': round(result.strategy_score, 1),
             'combined_raw': round(result.combined_raw, 2),
             'combined_norm_0_100': round(result.combined_norm_0_100, 1),
@@ -518,10 +519,6 @@ class EvidenceDecisionEngine:
             'threshold': result.threshold,
             'threshold_used': result.threshold,
             'threshold_used_reason': result.threshold_used_reason,
-            'pattern_confirmation': result.pattern_confirmation,
-            'primary_pattern': result.primary_pattern,
-            'pattern_direction': None,
-            'pattern_weight': self._pattern_weight,
             'strategy_weight': self._strategy_weight,
             # New fields
             'calibrated_probability': round(ensemble.calibrated_probability, 4),
