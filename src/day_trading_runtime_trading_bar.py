@@ -254,6 +254,127 @@ def runtime_process_trading_bar(
         result['strategy'] = regime_update.get("strategy")
         result['indicators'] = regime_update.get("indicators", {})
 
+    def _resolve_intrabar_checkpoint_meta() -> tuple[int, List[tuple[BarData, datetime, int]]]:
+        raw_step = getattr(getattr(session, "config", None), "intrabar_eval_step_seconds", 5)
+        try:
+            step = int(raw_step)
+        except (TypeError, ValueError):
+            step = 5
+        step = max(1, min(60, step))
+
+        raw_quotes = getattr(bar, "intrabar_quotes_1s", None)
+        checkpoints_meta: List[tuple[BarData, datetime, int]] = []
+
+        def _quote_midpoint(row: Dict[str, Any]) -> Optional[float]:
+            try:
+                bid = float(row.get("bid", 0.0) or 0.0)
+                ask = float(row.get("ask", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return None
+            if bid > 0.0 and ask > 0.0:
+                return (bid + ask) / 2.0
+            if ask > 0.0:
+                return ask
+            if bid > 0.0:
+                return bid
+            return None
+
+        if isinstance(raw_quotes, list) and raw_quotes:
+            import copy
+
+            normalized_by_second: Dict[int, Dict[str, Any]] = {}
+            for item in raw_quotes:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    sec = int(float(item.get("s", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= sec <= 59:
+                    normalized_by_second[sec] = dict(item, s=sec)
+
+            ordered_seconds = sorted(normalized_by_second.keys())
+            prefix_quotes: List[Dict[str, Any]] = []
+            for idx, sec in enumerate(ordered_seconds):
+                prefix_quotes.append(normalized_by_second[sec])
+                is_boundary = (sec % step == 0) or (sec == 59) or (idx == len(ordered_seconds) - 1)
+                if not is_boundary:
+                    continue
+
+                cp_bar = copy.copy(bar)
+                cp_quotes = [dict(row) for row in prefix_quotes]
+                cp_bar.intrabar_quotes_1s = cp_quotes
+
+                mids: List[float] = []
+                for row in cp_quotes:
+                    mid = _quote_midpoint(row)
+                    if mid is not None and mid > 0.0:
+                        mids.append(mid)
+
+                if mids:
+                    base_open = float(bar.open) if float(bar.open) > 0.0 else mids[0]
+                    cp_open = float(base_open)
+                    cp_close = float(mids[-1])
+                    cp_high = float(max([cp_open] + mids))
+                    cp_low = float(min([cp_open] + mids))
+                    cp_vwap: Optional[float] = float(sum(mids) / len(mids))
+                else:
+                    cp_open = float(bar.open)
+                    cp_high = float(bar.high)
+                    cp_low = float(bar.low)
+                    cp_close = float(bar.close)
+                    cp_vwap = _to_optional_float_impl(getattr(bar, "vwap", None))
+
+                elapsed_ratio = min(1.0, max(1.0 / 60.0, float(sec + 1) / 60.0))
+                cp_volume = float(bar.volume or 0.0) * elapsed_ratio
+
+                cp_bar.open = cp_open
+                cp_bar.high = cp_high
+                cp_bar.low = cp_low
+                cp_bar.close = cp_close
+                cp_bar.volume = cp_volume
+                cp_bar.vwap = cp_vwap
+
+                cp_ts = timestamp.replace(second=sec, microsecond=0)
+                checkpoints_meta.append((cp_bar, cp_ts, sec))
+
+        if not checkpoints_meta:
+            fallback_sec = max(0, min(int(getattr(timestamp, "second", 0) or 0), 59))
+            checkpoints_meta.append((bar, timestamp.replace(microsecond=0), fallback_sec))
+
+        return step, checkpoints_meta
+
+    if session.active_position:
+        step, checkpoints_meta = _resolve_intrabar_checkpoint_meta()
+        intrabar_eval_trace = {
+            "schema_version": 1,
+            "source": "intrabar_quote_checkpoints",
+            "minute_timestamp": timestamp.replace(second=0, microsecond=0).isoformat(),
+            "step_seconds": step,
+            "checkpoints": [],
+        }
+        for cp_bar, cp_ts, sec in checkpoints_meta:
+            slice_res = _runtime_evaluate_intrabar_slice_impl(self, session, cp_bar, cp_ts)
+            cp_payload = {
+                "timestamp": slice_res.get("timestamp", cp_ts.isoformat()),
+                "offset_sec": sec,
+                "layer_scores": (
+                    slice_res.get("layer_scores") if isinstance(slice_res, dict) else None
+                ),
+                "intrabar_1s": _calculate_intrabar_1s_snapshot_impl(cp_bar),
+                "provisional": True,
+            }
+            if isinstance(slice_res, dict):
+                if "signal_rejected" in slice_res:
+                    cp_payload["signal_rejected"] = slice_res["signal_rejected"]
+                if "candidate_diagnostics" in slice_res:
+                    cp_payload["candidate_diagnostics"] = slice_res["candidate_diagnostics"]
+            intrabar_eval_trace["checkpoints"].append(cp_payload)
+        if intrabar_eval_trace["checkpoints"]:
+            intrabar_eval_trace["checkpoints"][-1]["provisional"] = False
+            intrabar_eval_trace["checkpoint_count"] = len(intrabar_eval_trace["checkpoints"])
+        result["intrabar_eval_trace"] = intrabar_eval_trace
+
     if not session.active_position and session.selected_strategy:
         cooldown_remaining = _cooldown_bars_remaining_impl(session, current_bar_index)
         if cooldown_remaining > 0:
@@ -510,92 +631,7 @@ def runtime_process_trading_bar(
                 return result
 
         # ── 5s Intrabar Checkpoint Loop ──────────────────────
-        raw_step = getattr(getattr(session, "config", None), "intrabar_eval_step_seconds", 5)
-        try:
-            step = int(raw_step)
-        except (TypeError, ValueError):
-            step = 5
-        step = max(1, min(60, step))
-
-        raw_quotes = getattr(bar, "intrabar_quotes_1s", None)
-        checkpoints_meta = []
-
-        def _quote_midpoint(row: Dict[str, Any]) -> Optional[float]:
-            try:
-                bid = float(row.get("bid", 0.0) or 0.0)
-                ask = float(row.get("ask", 0.0) or 0.0)
-            except (TypeError, ValueError):
-                return None
-            if bid > 0.0 and ask > 0.0:
-                return (bid + ask) / 2.0
-            if ask > 0.0:
-                return ask
-            if bid > 0.0:
-                return bid
-            return None
-
-        if isinstance(raw_quotes, list) and raw_quotes:
-            import copy
-
-            normalized_by_second: Dict[int, Dict[str, Any]] = {}
-            for item in raw_quotes:
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    sec = int(float(item.get("s", 0) or 0))
-                except (TypeError, ValueError):
-                    continue
-                if 0 <= sec <= 59:
-                    normalized_by_second[sec] = dict(item, s=sec)
-
-            ordered_seconds = sorted(normalized_by_second.keys())
-            prefix_quotes: List[Dict[str, Any]] = []
-            for idx, sec in enumerate(ordered_seconds):
-                prefix_quotes.append(normalized_by_second[sec])
-                is_boundary = (sec % step == 0) or (sec == 59) or (idx == len(ordered_seconds) - 1)
-                if not is_boundary:
-                    continue
-
-                cp_bar = copy.copy(bar)
-                cp_quotes = [dict(row) for row in prefix_quotes]
-                cp_bar.intrabar_quotes_1s = cp_quotes
-
-                mids: List[float] = []
-                for row in cp_quotes:
-                    mid = _quote_midpoint(row)
-                    if mid is not None and mid > 0.0:
-                        mids.append(mid)
-
-                if mids:
-                    base_open = float(bar.open) if float(bar.open) > 0.0 else mids[0]
-                    cp_open = float(base_open)
-                    cp_close = float(mids[-1])
-                    cp_high = float(max([cp_open] + mids))
-                    cp_low = float(min([cp_open] + mids))
-                    cp_vwap: Optional[float] = float(sum(mids) / len(mids))
-                else:
-                    cp_open = float(bar.open)
-                    cp_high = float(bar.high)
-                    cp_low = float(bar.low)
-                    cp_close = float(bar.close)
-                    cp_vwap = _to_optional_float_impl(getattr(bar, "vwap", None))
-
-                elapsed_ratio = min(1.0, max(1.0 / 60.0, float(sec + 1) / 60.0))
-                cp_volume = float(bar.volume or 0.0) * elapsed_ratio
-
-                cp_bar.open = cp_open
-                cp_bar.high = cp_high
-                cp_bar.low = cp_low
-                cp_bar.close = cp_close
-                cp_bar.volume = cp_volume
-                cp_bar.vwap = cp_vwap
-
-                cp_ts = timestamp.replace(second=sec, microsecond=0)
-                checkpoints_meta.append((cp_bar, cp_ts, sec))
-
-        if not checkpoints_meta:
-            fallback_sec = max(0, min(int(getattr(timestamp, "second", 0) or 0), 59))
-            checkpoints_meta.append((bar, timestamp.replace(microsecond=0), fallback_sec))
+        step, checkpoints_meta = _resolve_intrabar_checkpoint_meta()
 
         intrabar_eval_trace = {
             "schema_version": 1,

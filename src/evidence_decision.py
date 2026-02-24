@@ -525,5 +525,6 @@ class EvidenceDecisionEngine:
             'confirming_sources': ensemble.confirming_sources,
             'total_sources': ensemble.total_sources,
             'source_weights': ensemble.source_weights,
+            'source_contributions': ensemble.source_contributions,
             'engine': 'evidence_v1',
         }

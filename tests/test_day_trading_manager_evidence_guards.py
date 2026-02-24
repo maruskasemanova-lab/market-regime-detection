@@ -241,6 +241,9 @@ def test_headwind_gate_rejects_borderline_bullish_signal() -> None:
                 headwind_score=0.78,
             )
 
+        def checkpoint_feature_vector(self, checkpoint_bar):
+            return None
+
     session.orchestrator = _StubOrchestrator()
 
     result = manager._process_trading_bar(session, bar, ts)
@@ -312,6 +315,9 @@ def test_intrabar_eval_trace_re_evaluates_checkpoint_layer_scores() -> None:
             self.current_feature_vector = None
             self.current_regime_state = None
             self.current_cross_asset_state = CrossAssetState()
+
+        def checkpoint_feature_vector(self, checkpoint_bar):
+            return None
 
     session.orchestrator = _StubOrchestrator()
 
@@ -484,6 +490,9 @@ def test_l2_hard_block_is_not_overridden_by_weak_l2_fast_break_even() -> None:
             self.current_regime_state = None
             self.current_cross_asset_state = None
 
+        def checkpoint_feature_vector(self, checkpoint_bar):
+            return None
+
     session.orchestrator = _StubOrchestrator()
 
     def _hard_block_gate(
@@ -646,6 +655,9 @@ def test_tcbbo_override_bypasses_mu_choppy_hard_block() -> None:
             self.current_feature_vector = None
             self.current_regime_state = None
             self.current_cross_asset_state = None
+
+        def checkpoint_feature_vector(self, checkpoint_bar):
+            return None
 
     session.orchestrator = _StubOrchestrator()
 

@@ -519,3 +519,165 @@ class FeatureStore:
         if abs(denominator) < 1e-10:
             return default
         return numerator / denominator
+
+    # ---------------------------------------------------------------
+    # Checkpoint snapshot (read-only — no mutation)
+    # ---------------------------------------------------------------
+
+    def compute_checkpoint_fv(
+        self,
+        checkpoint_bar: Dict[str, Any],
+        parent_fv: FeatureVector,
+    ) -> FeatureVector:
+        """
+        Produce a FeatureVector for a 5s checkpoint **without mutating** rolling
+        state.  Price-sensitive indicators are recomputed from the checkpoint's
+        OHLCV; z-scores use the current rolling windows (read-only via
+        ``RollingStats.z_score``).
+
+        Stateful indicators that require full bar history (EMA, ATR, ADX, OBV,
+        L2, multi-TF) are inherited from *parent_fv* — the minute-bar FV.
+        """
+        c = float(checkpoint_bar.get("close", 0) or 0)
+        h = float(checkpoint_bar.get("high", 0) or 0)
+        lo = float(checkpoint_bar.get("low", 0) or 0)
+        o = float(checkpoint_bar.get("open", 0) or 0)
+        v = float(checkpoint_bar.get("volume", 0) or 0)
+        vwap_raw = checkpoint_bar.get("vwap")
+        cp_vwap = float(vwap_raw) if vwap_raw is not None and float(vwap_raw) > 0 else parent_fv.vwap
+
+        # ── price-sensitive indicators (from deque + checkpoint close) ──
+        closes = list(self._closes)
+        if closes:
+            closes[-1] = c  # replace last bar with checkpoint close
+
+        sma_20 = sum(closes[-20:]) / min(len(closes), 20) if closes else 0.0
+
+        # ROC: checkpoint close vs N bars back
+        def _roc(period: int) -> float:
+            if len(closes) <= period:
+                return 0.0
+            prev = closes[-period - 1]
+            return ((c - prev) / prev * 100.0) if prev > 1e-10 else 0.0
+
+        roc_5 = _roc(5)
+        roc_10 = _roc(10)
+        roc_20 = _roc(20)
+
+        # RSI projection: take current Wilder state, apply checkpoint change
+        rsi_14 = parent_fv.rsi_14
+        if self._rsi_initialized and self._prev_close is not None and self._prev_close > 0:
+            change = c - self._prev_close
+            gain = max(change, 0.0)
+            loss = abs(min(change, 0.0))
+            period = 14
+            proj_gain = (self._rsi_avg_gain * (period - 1) + gain) / period
+            proj_loss = (self._rsi_avg_loss * (period - 1) + loss) / period
+            if proj_loss < 1e-10:
+                rsi_14 = 100.0
+            else:
+                rs = proj_gain / proj_loss
+                rsi_14 = 100.0 - (100.0 / (1.0 + rs))
+
+        # VWAP distance
+        vwap_dist_pct = ((c - cp_vwap) / cp_vwap * 100.0) if cp_vwap > 0 else 0.0
+
+        bar_range = h - lo
+        range_atr = (bar_range / parent_fv.atr_14) if parent_fv.atr_14 > 0 else 0.0
+
+        # Bollinger width with checkpoint close substituted
+        boll_width = parent_fv.bollinger_width
+        if len(closes) >= 20:
+            window = closes[-20:]
+            mean = sum(window) / 20
+            if mean > 1e-10:
+                variance = sum((x - mean) ** 2 for x in window) / 20
+                std = math.sqrt(variance) if variance > 0 else 0.0
+                boll_width = (2 * std * 2) / mean  # (upper - lower) / mean
+
+        # Trend efficiency with checkpoint close
+        trend_eff = parent_fv.trend_efficiency
+        if len(closes) >= 2:
+            lookback = min(30, len(closes))
+            window = closes[-lookback:]
+            net_move = abs(window[-1] - window[0])
+            total_move = sum(abs(window[i] - window[i - 1]) for i in range(1, len(window)))
+            trend_eff = self._safe_div(net_move, total_move, 0.0)
+
+        # ── z-scores from existing rolling stats (read-only) ──
+        rsi_z = self._stats_rsi.z_score(rsi_14)
+        volume_z = self._stats_volume.z_score(v)
+        vwap_dist_z = self._stats_vwap_dist.z_score(vwap_dist_pct)
+        roc_5_z = self._stats_roc5.z_score(roc_5)
+        roc_10_z = self._stats_roc10.z_score(roc_10)
+        momentum_z = roc_5_z * 0.5 + roc_10_z * 0.3 + parent_fv.adx_z * 0.2
+
+        volume_pct_rank = self._pstats_volume.percentile_rank(v)
+        range_pct_rank = self._pstats_range.percentile_rank(bar_range)
+
+        return FeatureVector(
+            bar_index=parent_fv.bar_index,
+            close=c, open=o, high=h, low=lo, volume=v, vwap=cp_vwap,
+            # Recomputed
+            sma_20=sma_20,
+            rsi_14=rsi_14,
+            roc_5=roc_5, roc_10=roc_10, roc_20=roc_20,
+            vwap_distance_pct=vwap_dist_pct,
+            range_atr_ratio=range_atr,
+            bollinger_width=boll_width,
+            trend_efficiency=trend_eff,
+            # Z-scores (from current rolling windows)
+            rsi_z=rsi_z,
+            volume_z=volume_z,
+            vwap_dist_z=vwap_dist_z,
+            roc_5_z=roc_5_z, roc_10_z=roc_10_z,
+            momentum_z=momentum_z,
+            # Percentile ranks
+            volume_pct_rank=volume_pct_rank,
+            range_pct_rank=range_pct_rank,
+            # ── inherited from parent (stateful, not recomputable) ──
+            ema_10=parent_fv.ema_10,
+            ema_20=parent_fv.ema_20,
+            atr_14=parent_fv.atr_14,
+            adx_14=parent_fv.adx_14,
+            obv=parent_fv.obv,
+            obv_slope=parent_fv.obv_slope,
+            atr_z=parent_fv.atr_z,
+            adx_z=parent_fv.adx_z,
+            atr_pct_rank=parent_fv.atr_pct_rank,
+            # L2 (unchanged per checkpoint)
+            l2_has_coverage=parent_fv.l2_has_coverage,
+            l2_delta=parent_fv.l2_delta,
+            l2_signed_aggression=parent_fv.l2_signed_aggression,
+            l2_directional_consistency=parent_fv.l2_directional_consistency,
+            l2_imbalance=parent_fv.l2_imbalance,
+            l2_absorption_rate=parent_fv.l2_absorption_rate,
+            l2_sweep_intensity=parent_fv.l2_sweep_intensity,
+            l2_book_pressure=parent_fv.l2_book_pressure,
+            l2_large_trader_activity=parent_fv.l2_large_trader_activity,
+            l2_delta_zscore=parent_fv.l2_delta_zscore,
+            l2_flow_score=parent_fv.l2_flow_score,
+            l2_iceberg_bias=parent_fv.l2_iceberg_bias,
+            l2_participation_ratio=parent_fv.l2_participation_ratio,
+            l2_delta_acceleration=parent_fv.l2_delta_acceleration,
+            l2_delta_price_divergence=parent_fv.l2_delta_price_divergence,
+            l2_delta_z=parent_fv.l2_delta_z,
+            l2_aggression_z=parent_fv.l2_aggression_z,
+            l2_imbalance_z=parent_fv.l2_imbalance_z,
+            l2_book_pressure_z=parent_fv.l2_book_pressure_z,
+            l2_sweep_z=parent_fv.l2_sweep_z,
+            l2_flow_score_z=parent_fv.l2_flow_score_z,
+            # Multi-timeframe (unchanged per checkpoint)
+            tf5_trend_slope=parent_fv.tf5_trend_slope,
+            tf5_rsi=parent_fv.tf5_rsi,
+            tf15_trend_slope=parent_fv.tf15_trend_slope,
+            tf15_rsi=parent_fv.tf15_rsi,
+            tf5_volume_ratio=parent_fv.tf5_volume_ratio,
+            tf15_volume_ratio=parent_fv.tf15_volume_ratio,
+            # Cross-asset (unchanged per checkpoint)
+            index_trend=parent_fv.index_trend,
+            sector_relative=parent_fv.sector_relative,
+            correlation_20=parent_fv.correlation_20,
+            headwind_score=parent_fv.headwind_score,
+        )
+

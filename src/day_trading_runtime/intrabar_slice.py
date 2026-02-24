@@ -65,7 +65,16 @@ def runtime_evaluate_intrabar_slice(
     if orch is None:
         return {"error": "Orchestrator not initialized"}
 
-    fv = orch.current_feature_vector
+    # Per-checkpoint feature vector: recomputes price-sensitive indicators
+    # (RSI, ROC, VWAP dist) from the checkpoint's OHLCV without mutating
+    # rolling state.  Falls back to the minute-bar FV only if orchestrator
+    # hasn't been warmed up yet.
+    cp_bar_dict = {
+        "open": bar.open, "high": bar.high, "low": bar.low,
+        "close": bar.close, "volume": bar.volume,
+        "vwap": getattr(bar, "vwap", None),
+    }
+    fv = orch.checkpoint_feature_vector(cp_bar_dict) or orch.current_feature_vector
     if fv is not None:
         l2_aggression_z = feature_vector_value(fv, "l2_aggression_z", 0.0)
         l2_book_pressure_z = feature_vector_value(fv, "l2_book_pressure_z", 0.0)
@@ -101,7 +110,7 @@ def runtime_evaluate_intrabar_slice(
         ticker=session.ticker,
         generate_signal_fn=gen_signal_fn,
         is_long_only=is_long_only,
-        feature_vector=orch.current_feature_vector,
+        feature_vector=fv,
         regime_state=orch.current_regime_state,
         cross_asset_state=orch.current_cross_asset_state,
         time_of_day_boost=tod_boost,

@@ -48,6 +48,9 @@ class _StubOrchestrator:
         self.current_regime_state = None
         self.current_cross_asset_state = None
 
+    def checkpoint_feature_vector(self, checkpoint_bar):
+        return None
+
 
 def test_custom_entry_formula_can_reject_signal() -> None:
     manager = DayTradingManager(
