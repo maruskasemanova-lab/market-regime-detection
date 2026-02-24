@@ -51,6 +51,7 @@ def runtime_generate_signal(
         "momentum_flow",
         "exhaustion_fade",
         "scalp_l2_intrabar",
+        "evidence_scalp",
     }
 
     for strategy_name in active_strategies:

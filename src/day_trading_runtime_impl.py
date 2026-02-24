@@ -726,139 +726,172 @@ def runtime_process_trading_bar(
                 }
                 return result
 
-        def gen_signal_fn():
-            return self._generate_signal(session, bar, timestamp)
+        # ── 5s Intrabar Checkpoint Loop ──────────────────────
+        raw_step = getattr(getattr(session, "config", None), "intrabar_eval_step_seconds", 5)
+        try:
+            step = int(raw_step)
+        except (TypeError, ValueError):
+            step = 5
+        step = max(1, min(60, step))
 
-        tod_boost = self.gate_engine.time_of_day_threshold_boost(bar_time)
-        required_confirming_sources = self._required_confirming_sources(session, bar_time)
-        if not orch.config.use_evidence_engine:
-            # Hard-disable legacy decision mode: execution is evidence-only.
-            orch.config.use_evidence_engine = True
+        raw_quotes = getattr(bar, "intrabar_quotes_1s", None)
+        checkpoints_meta = []
 
-        decision = orch.evidence_engine.evaluate(
-            ohlcv=ohlcv,
-            indicators=indicators,
-            regime=regime,
-            strategies=self.strategies,
-            active_strategy_names=session.active_strategies,
-            current_price=current_price,
-            timestamp=timestamp,
-            ticker=session.ticker,
-            generate_signal_fn=gen_signal_fn,
-            is_long_only=is_long_only,
-            feature_vector=orch.current_feature_vector,
-            regime_state=orch.current_regime_state,
-            cross_asset_state=orch.current_cross_asset_state,
-            time_of_day_boost=tod_boost,
-        )
-        effective_weights = self._resolve_evidence_weight_context(flow_metrics)
-        headwind_boost, headwind_metrics = self.gate_engine.cross_asset_headwind_threshold_boost(
-            cross_asset_state=orch.current_cross_asset_state,
-            decision_direction=getattr(decision, "direction", None),
-        )
-        effective_trade_threshold = float(decision.threshold) + float(headwind_boost)
-        threshold_used_reason = str(
-            getattr(decision, "threshold_used_reason", "base_threshold")
-        )
-        if headwind_boost > 0.0:
-            threshold_used_reason = f"{threshold_used_reason}+headwind({headwind_boost:.1f})"
+        def _quote_midpoint(row: Dict[str, Any]) -> Optional[float]:
+            try:
+                bid = float(row.get("bid", 0.0) or 0.0)
+                ask = float(row.get("ask", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return None
+            if bid > 0.0 and ask > 0.0:
+                return (bid + ask) / 2.0
+            if ask > 0.0:
+                return ask
+            if bid > 0.0:
+                return bid
+            return None
 
-        tcbbo_threshold_relief = 0.0
-        tcbbo_override_direction = str(tcbbo_regime_override.get("direction", "neutral") or "neutral").lower()
-        decision_direction = str(getattr(decision, "direction", "") or "").lower()
-        if bool(tcbbo_regime_override.get("applied", False)) and decision_direction == tcbbo_override_direction:
-            tcbbo_threshold_relief = max(
-                2.0,
-                min(8.0, float(getattr(session, "tcbbo_sweep_boost", 5.0) or 5.0)),
-            )
-            effective_trade_threshold = max(0.0, effective_trade_threshold - tcbbo_threshold_relief)
-            threshold_used_reason = (
-                f"{threshold_used_reason}-tcbbo({tcbbo_threshold_relief:.1f})"
-            )
-        passed_trade_threshold = float(decision.combined_score) >= effective_trade_threshold
+        if isinstance(raw_quotes, list) and raw_quotes:
+            import copy
 
-        # Always report layer scores
-        combined_raw = float(getattr(decision, "combined_raw", decision.combined_score) or 0.0)
-        combined_norm = getattr(decision, "combined_norm_0_100", None)
-        result['layer_scores'] = {
-            'schema_version': 2,
-            'strategy_score': round(decision.strategy_score, 1),
-            'combined_score': round(decision.combined_score, 1),
-            'combined_raw': round(combined_raw, 1),
-            'combined_norm_0_100': round(float(combined_norm), 1) if combined_norm is not None else None,
-            'threshold': decision.threshold,
-            'trade_gate_threshold': float(effective_trade_threshold),
-            'threshold_used': float(effective_trade_threshold),
-            'threshold_used_reason': threshold_used_reason,
-            'strategy_weight': round(float(effective_weights["strategy_weight"]), 3),
-            'strategy_weight_source': effective_weights["strategy_weight_source"],
-            'l2_has_coverage': bool(effective_weights["l2_has_coverage"]),
-            'l2_quality_ok': bool(effective_weights["l2_quality_ok"]),
-            'l2_coverage_ratio': round(float(effective_weights["l2_coverage_ratio"]), 3),
-            'weights_snapshot': {
-                'base_strategy_weight': round(float(effective_weights["base_strategy_weight"]), 3),
-                'effective_strategy_weight': round(float(effective_weights["strategy_weight"]), 3),
-                'strategy_weight_source': effective_weights["strategy_weight_source"],
-            },
-            'flow_score': round(float(flow_metrics.get('flow_score', 0.0) or 0.0), 1),
-            'l2_aggression_z': round(float(flow_metrics.get('l2_aggression_z', 0.0) or 0.0), 3),
-            'l2_book_pressure_z': round(float(flow_metrics.get('l2_book_pressure_z', 0.0) or 0.0), 3),
-            'book_pressure_avg': round(float(flow_metrics.get('book_pressure_avg', 0.0) or 0.0), 3),
-            'book_pressure_trend': round(float(flow_metrics.get('book_pressure_trend', 0.0) or 0.0), 3),
-            'large_trader_activity': round(float(flow_metrics.get('large_trader_activity', 0.0) or 0.0), 3),
-            'vwap_execution_flow': round(float(flow_metrics.get('vwap_execution_flow', 0.0) or 0.0), 3),
-            'sweep_detected': bool(sweep_detection.get('sweep_detected', False)),
-            'sweep_reason': str(sweep_detection.get('reason', 'unknown')),
-            'micro_regime': session.micro_regime,
-            'passed': bool(decision.execute and passed_trade_threshold),
-            'tod_threshold_boost': tod_boost,
-            'headwind_threshold_boost': round(float(headwind_boost), 4),
-            'tcbbo_threshold_relief': round(float(tcbbo_threshold_relief), 4),
-            'headwind_activation_score': float(getattr(self, "headwind_activation_score", 0.5)),
-            'cross_asset_headwind': headwind_metrics,
-            'tcbbo_regime_override': dict(tcbbo_regime_override),
-            'required_confirming_sources': required_confirming_sources,
-            'engine': 'evidence_v1',
+            normalized_by_second: Dict[int, Dict[str, Any]] = {}
+            for item in raw_quotes:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    sec = int(float(item.get("s", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= sec <= 59:
+                    normalized_by_second[sec] = dict(item, s=sec)
+
+            ordered_seconds = sorted(normalized_by_second.keys())
+            prefix_quotes: List[Dict[str, Any]] = []
+            for idx, sec in enumerate(ordered_seconds):
+                prefix_quotes.append(normalized_by_second[sec])
+                is_boundary = (sec % step == 0) or (sec == 59) or (idx == len(ordered_seconds) - 1)
+                if not is_boundary:
+                    continue
+
+                cp_bar = copy.copy(bar)
+                cp_quotes = [dict(row) for row in prefix_quotes]
+                cp_bar.intrabar_quotes_1s = cp_quotes
+
+                mids: List[float] = []
+                for row in cp_quotes:
+                    mid = _quote_midpoint(row)
+                    if mid is not None and mid > 0.0:
+                        mids.append(mid)
+
+                if mids:
+                    base_open = float(bar.open) if float(bar.open) > 0.0 else mids[0]
+                    cp_open = float(base_open)
+                    cp_close = float(mids[-1])
+                    cp_high = float(max([cp_open] + mids))
+                    cp_low = float(min([cp_open] + mids))
+                    cp_vwap: Optional[float] = float(sum(mids) / len(mids))
+                else:
+                    cp_open = float(bar.open)
+                    cp_high = float(bar.high)
+                    cp_low = float(bar.low)
+                    cp_close = float(bar.close)
+                    cp_vwap = _to_optional_float(getattr(bar, "vwap", None))
+
+                elapsed_ratio = min(1.0, max(1.0 / 60.0, float(sec + 1) / 60.0))
+                cp_volume = float(bar.volume or 0.0) * elapsed_ratio
+
+                cp_bar.open = cp_open
+                cp_bar.high = cp_high
+                cp_bar.low = cp_low
+                cp_bar.close = cp_close
+                cp_bar.volume = cp_volume
+                cp_bar.vwap = cp_vwap
+
+                cp_ts = timestamp.replace(second=sec, microsecond=0)
+                checkpoints_meta.append((cp_bar, cp_ts, sec))
+
+        if not checkpoints_meta:
+            fallback_sec = max(0, min(int(getattr(timestamp, "second", 0) or 0), 59))
+            checkpoints_meta.append((bar, timestamp.replace(microsecond=0), fallback_sec))
+
+        intrabar_eval_trace = {
+            "schema_version": 1,
+            "source": "intrabar_quote_checkpoints",
+            "minute_timestamp": timestamp.replace(second=0, microsecond=0).isoformat(),
+            "step_seconds": step,
+            "checkpoints": []
         }
 
-        # Strategy-aware threshold corrections: applied once the signal strategy
-        # is known.  MR/rotation get reduced midday penalty (+3 vs +7) and
-        # capped cross-asset headwind (+2 vs +5..+10).
-        if decision.signal:
-            _sig_strat = str(decision.signal.strategy_name or "").strip().lower()
-            _threshold_adjusted = False
-            _MIDDAY_RELAXED_STRATS = {"mean_reversion", "rotation", "vwap_magnet", "volumeprofile"}
+        last_slice_res: Optional[Dict[str, Any]] = None
+        trigger_slice_res: Optional[Dict[str, Any]] = None
+        for cp_bar, cp_ts, sec in checkpoints_meta:
+            slice_res = _runtime_evaluate_intrabar_slice_impl(self, session, cp_bar, cp_ts)
+            cp_layer_scores = (
+                slice_res.get("layer_scores")
+                if isinstance(slice_res, dict)
+                else None
+            )
+            cp_payload = {
+                "timestamp": slice_res.get("timestamp", cp_ts.isoformat()),
+                "offset_sec": sec,
+                "layer_scores": cp_layer_scores,
+                "intrabar_1s": _calculate_intrabar_1s_snapshot_impl(cp_bar),
+                "provisional": True,
+            }
+            if "signal_rejected" in slice_res:
+                cp_payload["signal_rejected"] = slice_res["signal_rejected"]
+            if "candidate_diagnostics" in slice_res:
+                cp_payload["candidate_diagnostics"] = slice_res["candidate_diagnostics"]
 
-            # Midday relief
-            if tod_boost > 0 and _sig_strat in _MIDDAY_RELAXED_STRATS:
-                _strategy_tod = self.gate_engine.time_of_day_threshold_boost(
-                    bar_time, strategy_key=_sig_strat,
-                )
-                _tod_relief = tod_boost - _strategy_tod
-                if _tod_relief > 0:
-                    effective_trade_threshold = max(0.0, effective_trade_threshold - _tod_relief)
-                    tod_boost = _strategy_tod
-                    threshold_used_reason = f"{threshold_used_reason}-midday_relief({_tod_relief:.0f})"
-                    _threshold_adjusted = True
+            intrabar_eval_trace["checkpoints"].append(cp_payload)
+            last_slice_res = slice_res
+            if (
+                trigger_slice_res is None
+                and slice_res.get("_raw_signal") is not None
+                and bool((cp_layer_scores or {}).get("passed", False))
+            ):
+                trigger_slice_res = slice_res
 
-            # Headwind relief for contrarian strategies
-            _HEADWIND_CONTRARIAN = {"mean_reversion", "absorption_reversal", "rotation"}
-            if headwind_boost > 2.0 and _sig_strat in _HEADWIND_CONTRARIAN:
-                _old_hw = headwind_boost
-                headwind_boost = min(headwind_boost, 2.0)
-                _hw_relief = _old_hw - headwind_boost
-                effective_trade_threshold = max(0.0, effective_trade_threshold - _hw_relief)
-                threshold_used_reason = f"{threshold_used_reason}-hw_relief({_hw_relief:.1f})"
-                _threshold_adjusted = True
+        if intrabar_eval_trace["checkpoints"]:
+            intrabar_eval_trace["checkpoints"][-1]["provisional"] = False
+            intrabar_eval_trace["checkpoint_count"] = len(intrabar_eval_trace["checkpoints"])
 
-            if _threshold_adjusted:
-                passed_trade_threshold = float(decision.combined_score) >= effective_trade_threshold
-                result['layer_scores']['trade_gate_threshold'] = float(effective_trade_threshold)
-                result['layer_scores']['threshold_used'] = float(effective_trade_threshold)
-                result['layer_scores']['threshold_used_reason'] = threshold_used_reason
-                result['layer_scores']['tod_threshold_boost'] = tod_boost
-                result['layer_scores']['headwind_threshold_boost'] = round(float(headwind_boost), 4)
-                result['layer_scores']['passed'] = bool(decision.execute and passed_trade_threshold)
+        decision_slice_res = trigger_slice_res or last_slice_res or {}
+        result["intrabar_eval_trace"] = intrabar_eval_trace
+        if "layer_scores" in decision_slice_res:
+            result["layer_scores"] = decision_slice_res["layer_scores"]
+        if "signal_rejected" in decision_slice_res:
+            result["signal_rejected"] = decision_slice_res["signal_rejected"]
+        if "candidate_diagnostics" in decision_slice_res:
+            result["candidate_diagnostics"] = decision_slice_res["candidate_diagnostics"]
+
+        # Synthesize a mock Decision object so the subsequent gate sequence behaves identically.
+        _ls = decision_slice_res.get("layer_scores", {})
+        combined_score = float(decision_slice_res.get("_combined_score_raw", _ls.get("combined_score", 0.0)) or 0.0)
+        effective_trade_threshold = float(_ls.get("threshold_used", 0.0))
+        passed_trade_threshold = bool(
+            decision_slice_res.get("_passed_trade_threshold", combined_score >= effective_trade_threshold)
+        )
+        tod_boost = float(_ls.get("tod_threshold_boost", 0.0))
+        headwind_boost = float(_ls.get("headwind_threshold_boost", 0.0))
+        headwind_metrics = _ls.get("cross_asset_headwind", {})
+        required_confirming_sources = int(_ls.get("required_confirming_sources", 2))
+        threshold_used_reason = str(_ls.get("threshold_used_reason", "base_threshold"))
+        
+        class DecisionProxy:
+            pass
+        decision = DecisionProxy()
+        decision.combined_score = combined_score
+        decision.execute = bool(decision_slice_res.get("_decision_execute", _ls.get("passed", False)))
+        decision.signal = decision_slice_res.get("_raw_signal")
+        decision.strategy_score = float(_ls.get("strategy_score", 0.0))
+        decision.combined_raw = float(_ls.get("combined_raw", 0.0))
+        decision.combined_norm_0_100 = _ls.get("combined_norm_0_100", None)
+        decision.threshold = float(_ls.get("threshold", 0.0))
+        decision.reasoning = str(
+            decision_slice_res.get("_decision_reasoning", "Checkpoints evaluated")
+            or "Checkpoints evaluated"
+        )
 
         if decision.execute and decision.signal and passed_trade_threshold:
             signal = decision.signal

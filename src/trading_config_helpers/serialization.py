@@ -864,6 +864,16 @@ def build_trading_config_from_dict(cls: type["TradingConfig"], d: Dict[str, Any]
                 defaults.intraday_levels_micro_confirmation_intrabar_max_spread_bps,
             ),
         ),
+        intrabar_eval_step_seconds=max(
+            1,
+            min(
+                60,
+                cls._to_int(
+                    raw.get("intrabar_eval_step_seconds"),
+                    defaults.intrabar_eval_step_seconds,
+                ),
+            ),
+        ),
         intraday_levels_confluence_sizing_enabled=cls._to_bool(
             raw.get("intraday_levels_confluence_sizing_enabled"),
             defaults.intraday_levels_confluence_sizing_enabled,
@@ -1315,6 +1325,7 @@ def trading_config_to_session_params(config: "TradingConfig") -> Dict[str, Any]:
         "intraday_levels_micro_confirmation_intrabar_max_spread_bps": float(
             config.intraday_levels_micro_confirmation_intrabar_max_spread_bps
         ),
+        "intrabar_eval_step_seconds": int(config.intrabar_eval_step_seconds),
         "intraday_levels_confluence_sizing_enabled": bool(
             config.intraday_levels_confluence_sizing_enabled
         ),

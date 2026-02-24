@@ -38,7 +38,7 @@ def test_build_position_closed_payload_includes_level_context_and_flow_diagnosti
         },
     )
 
-    payload = manager._build_position_closed_payload(
+    payload = manager.exit_engine.build_position_closed_payload(
         trade=trade,
         exit_reason="take_profit",
         bars_held=6,
@@ -96,7 +96,7 @@ def test_build_position_closed_payload_marks_first_bar_stop_loss_diagnostics() -
         },
     )
 
-    payload = manager._build_position_closed_payload(
+    payload = manager.exit_engine.build_position_closed_payload(
         trade=trade,
         exit_reason="stop_loss",
         bars_held=1,

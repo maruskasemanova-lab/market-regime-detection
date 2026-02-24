@@ -152,6 +152,7 @@ class TradingConfig:
     intraday_levels_micro_confirmation_intrabar_min_move_pct: float = 0.02
     intraday_levels_micro_confirmation_intrabar_min_push_ratio: float = 0.10
     intraday_levels_micro_confirmation_intrabar_max_spread_bps: float = 12.0
+    intrabar_eval_step_seconds: int = 5
     intraday_levels_confluence_sizing_enabled: bool = False
     liquidity_sweep_detection_enabled: bool = False
     sweep_min_aggression_z: float = -2.0
@@ -169,7 +170,7 @@ class TradingConfig:
     context_risk_max_anchor_search_pct: float = 1.5
     context_risk_min_level_tests_for_sl: int = 1
     l2_gate_mode: str = "weighted"  # "weighted" | "all_pass"
-    l2_gate_threshold: float = 0.50
+    l2_gate_threshold: float = 0.30
     cold_start_each_day: bool = False
     premarket_trading_enabled: bool = False
     strategy_selection_mode: str = "adaptive_top_n"

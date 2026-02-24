@@ -90,6 +90,7 @@ class DayTradingManager:
         "absorption_reversal",
         "exhaustion_fade",
         "scalp_l2_intrabar",
+        "evidence_scalp",
     )
     MOMENTUM_ROUTE_KEYS = ("impulse", "continuation", "defensive")
     DEFAULT_MOMENTUM_STRATEGIES = ("momentum_flow", "momentum", "pullback")
@@ -319,6 +320,7 @@ class DayTradingManager:
                 'scalp_l2_intrabar',
                 'volume_profile',
                 'vwap_magnet',
+                'evidence_scalp',
             ],
             Regime.CHOPPY: [
                 'absorption_reversal',
@@ -327,6 +329,7 @@ class DayTradingManager:
                 'vwap_magnet',
                 'scalp_l2_intrabar',
                 'volume_profile',
+                'evidence_scalp',
             ],
             Regime.MIXED: [
                 'exhaustion_fade',
@@ -337,18 +340,19 @@ class DayTradingManager:
                 'mean_reversion',
                 'vwap_magnet',
                 'rotation',
+                'evidence_scalp',
             ],
         }
 
         self.micro_regime_preference = {
-            "TRENDING_UP": ['momentum_flow', 'momentum', 'pullback', 'gap_liquidity', 'scalp_l2_intrabar'],
-            "TRENDING_DOWN": ['momentum_flow', 'momentum', 'gap_liquidity', 'pullback', 'scalp_l2_intrabar'],
-            "CHOPPY": ['absorption_reversal', 'exhaustion_fade', 'mean_reversion', 'vwap_magnet'],
-            "ABSORPTION": ['absorption_reversal', 'exhaustion_fade', 'vwap_magnet'],
-            "BREAKOUT": ['momentum_flow', 'momentum', 'gap_liquidity', 'scalp_l2_intrabar'],
-            "MIXED": ['exhaustion_fade', 'volume_profile', 'rotation'],
-            "TRANSITION": ['vwap_magnet', 'volume_profile', 'rotation'],
-            "UNKNOWN": ['vwap_magnet', 'volume_profile'],
+            "TRENDING_UP": ['momentum_flow', 'momentum', 'pullback', 'gap_liquidity', 'scalp_l2_intrabar', 'evidence_scalp'],
+            "TRENDING_DOWN": ['momentum_flow', 'momentum', 'gap_liquidity', 'pullback', 'scalp_l2_intrabar', 'evidence_scalp'],
+            "CHOPPY": ['absorption_reversal', 'exhaustion_fade', 'mean_reversion', 'vwap_magnet', 'evidence_scalp'],
+            "ABSORPTION": ['absorption_reversal', 'exhaustion_fade', 'vwap_magnet', 'evidence_scalp'],
+            "BREAKOUT": ['momentum_flow', 'momentum', 'gap_liquidity', 'scalp_l2_intrabar', 'evidence_scalp'],
+            "MIXED": ['exhaustion_fade', 'volume_profile', 'rotation', 'evidence_scalp'],
+            "TRANSITION": ['vwap_magnet', 'volume_profile', 'rotation', 'evidence_scalp'],
+            "UNKNOWN": ['vwap_magnet', 'volume_profile', 'evidence_scalp'],
         }
         
         # Ticker-Specific Preferences (AOS Optimized)

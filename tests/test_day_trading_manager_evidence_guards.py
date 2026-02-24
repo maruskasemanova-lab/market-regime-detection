@@ -250,6 +250,86 @@ def test_headwind_gate_rejects_borderline_bullish_signal() -> None:
     assert session.pending_signal is None
 
 
+def test_intrabar_eval_trace_re_evaluates_checkpoint_layer_scores() -> None:
+    manager = DayTradingManager(
+        regime_detection_minutes=0,
+        trade_cooldown_bars=0,
+        max_trades_per_day=10,
+    )
+    session = manager.get_or_create_session("run", "MU", "2026-02-03")
+    session.phase = SessionPhase.TRADING
+    session.selected_strategy = "momentum_flow"
+    session.detected_regime = Regime.TRENDING
+    session.micro_regime = "TRENDING_UP"
+    session.active_strategies = ["momentum_flow"]
+    session.config = TradingConfig.from_dict({"intrabar_eval_step_seconds": 5})
+
+    ts = datetime(2026, 2, 3, 15, 1, tzinfo=timezone.utc)
+    intrabar_quotes = []
+    for sec in range(1, 13):
+        mid = 100.0 + (0.2 * sec)
+        intrabar_quotes.append({"s": sec, "bid": mid - 0.01, "ask": mid + 0.01})
+
+    bar = BarData(
+        timestamp=ts,
+        open=100.0,
+        high=103.0,
+        low=99.8,
+        close=102.4,
+        volume=120_000.0,
+        vwap=101.0,
+        intrabar_quotes_1s=intrabar_quotes,
+    )
+    session.bars.append(bar)
+
+    class _StubEvidenceEngine:
+        def __init__(self):
+            self.observed_closes: List[float] = []
+
+        def evaluate(self, **kwargs) -> DecisionResult:
+            close_now = float(kwargs["ohlcv"]["close"][-1])
+            self.observed_closes.append(close_now)
+            return DecisionResult(
+                execute=False,
+                direction="bullish",
+                signal=None,
+                combined_score=close_now,
+                combined_raw=close_now,
+                combined_norm_0_100=close_now,
+                strategy_score=close_now,
+                threshold=999.0,
+                trade_gate_threshold=999.0,
+                reasoning="trace-test",
+            )
+
+    class _StubConfig:
+        use_evidence_engine = True
+
+    class _StubOrchestrator:
+        def __init__(self):
+            self.config = _StubConfig()
+            self.evidence_engine = _StubEvidenceEngine()
+            self.current_feature_vector = None
+            self.current_regime_state = None
+            self.current_cross_asset_state = CrossAssetState()
+
+    session.orchestrator = _StubOrchestrator()
+
+    result = manager._process_trading_bar(session, bar, ts)
+
+    trace = result.get("intrabar_eval_trace", {})
+    checkpoints = trace.get("checkpoints", [])
+
+    assert trace.get("checkpoint_count") == 3
+    assert [cp.get("offset_sec") for cp in checkpoints] == [5, 10, 12]
+    assert all(isinstance(cp.get("layer_scores"), dict) for cp in checkpoints)
+
+    combined_scores = [cp["layer_scores"]["combined_score"] for cp in checkpoints]
+    assert combined_scores[0] < combined_scores[1] < combined_scores[2]
+    assert result.get("layer_scores", {}).get("combined_score") == combined_scores[-1]
+    assert len(session.orchestrator.evidence_engine.observed_closes) == 3
+
+
 def test_l2_confirmation_hard_book_pressure_block_long() -> None:
     manager = DayTradingManager(regime_detection_minutes=0)
     session = manager.get_or_create_session("run", "MU", "2026-02-03")

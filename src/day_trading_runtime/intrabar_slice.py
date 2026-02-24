@@ -21,8 +21,11 @@ def runtime_evaluate_intrabar_slice(
     Used by the Strategy Analyzer to view full evidence tracing for any 5s checkpoint.
     """
 
-    bars_data = list(session.bars[-99:]) if len(session.bars) >= 99 else list(session.bars)
-    bars_data.append(bar)
+    bars_data = list(session.bars[-100:]) if len(session.bars) >= 100 else list(session.bars)
+    if bars_data and getattr(bars_data[-1], "timestamp", None) == bar.timestamp:
+        bars_data[-1] = bar
+    else:
+        bars_data.append(bar)
 
     ohlcv = {
         "open": [b.open for b in bars_data],
@@ -168,6 +171,11 @@ def runtime_evaluate_intrabar_slice(
     result = {
         "timestamp": timestamp.isoformat(),
         "layer_scores": layer_scores,
+        "_decision_execute": bool(getattr(decision, "execute", False)),
+        "_passed_trade_threshold": bool(passed_trade_threshold),
+        "_decision_reasoning": str(getattr(decision, "reasoning", "") or ""),
+        "_decision_direction": getattr(decision, "direction", None),
+        "_combined_score_raw": float(getattr(decision, "combined_score", 0.0) or 0.0),
     }
 
     if decision.signal:
@@ -178,6 +186,7 @@ def runtime_evaluate_intrabar_slice(
         layer_scores["aligned_evidence_sources"] = confirming_stats["aligned_evidence_sources"]
         layer_scores["aligned_source_keys"] = confirming_stats["aligned_source_keys"]
         result["signal"] = signal.to_dict()
+        result["_raw_signal"] = signal
 
         cand_diag = signal.metadata.get("candidate_diagnostics")
         if cand_diag:

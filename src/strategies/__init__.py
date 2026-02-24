@@ -16,6 +16,7 @@ from .momentum_flow import MomentumFlowStrategy
 from .exhaustion_fade import ExhaustionFadeStrategy
 from .iceberg_defense import IcebergDefenseStrategy
 from .scalp_l2_intrabar import ScalpL2IntrabarStrategy
+from .evidence_scalp import EvidenceScalpStrategy
 
 __all__ = [
     'BaseStrategy',
@@ -35,4 +36,5 @@ __all__ = [
     'ExhaustionFadeStrategy',
     'IcebergDefenseStrategy',
     'ScalpL2IntrabarStrategy',
+    'EvidenceScalpStrategy',
 ]

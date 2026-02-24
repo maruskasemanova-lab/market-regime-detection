@@ -103,10 +103,15 @@ def test_intrabar_confirmation_rejects_low_push_ratio() -> None:
             ts,
             100.0,
             intrabar_quotes_1s=[
-                {"s": 1, "bid": 100.00, "ask": 100.02},
-                {"s": 2, "bid": 100.01, "ask": 100.03},
-                {"s": 3, "bid": 100.00, "ask": 100.02},
-                {"s": 4, "bid": 100.02, "ask": 100.04},
+                {"s": 1, "bid": 99.99, "ask": 100.01},  # 100.00
+                {"s": 2, "bid": 100.00, "ask": 100.02}, # 100.01
+                {"s": 3, "bid": 100.01, "ask": 100.03}, # 100.02
+                {"s": 4, "bid": 100.02, "ask": 100.04}, # 100.03
+                {"s": 5, "bid": 100.01, "ask": 100.03}, # 100.02
+                {"s": 6, "bid": 100.00, "ask": 100.02}, # 100.01
+                {"s": 7, "bid": 100.01, "ask": 100.03}, # 100.02
+                {"s": 8, "bid": 100.02, "ask": 100.04}, # 100.03
+                {"s": 9, "bid": 100.03, "ask": 100.05}, # 100.04
             ],
         )
     ]
@@ -117,9 +122,9 @@ def test_intrabar_confirmation_rejects_low_push_ratio() -> None:
         signal=signal,
         current_bar_index=1,
         signal_bar_index=0,
-        window_seconds=5,
+        window_seconds=10,
         min_coverage_points=2,
-        min_move_pct=0.005,
+        min_move_pct=0.035,
         min_push_ratio=0.8,
         max_spread_bps=20.0,
     )

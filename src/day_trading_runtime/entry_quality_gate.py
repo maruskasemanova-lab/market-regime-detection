@@ -711,9 +711,39 @@ def runtime_evaluate_intraday_levels_entry_quality(
                 soft_reasons.append("momentum_poc_migration_mismatch")
             if not checks["gap_momentum_bias_aligned"]:
                 soft_reasons.append("momentum_gap_bias_mismatch")
+        elif strategy_key == "pullback":
+            checks["strategy_specific_gate_applied"] = True
+
+            # Pullbacks require a tested level nearby or at least some level context
+            checks["near_tested_level"] = len(near_tested_levels) >= 1
+            checks["minimum_confluence_score"] = near_confluence_score >= 1
+            checks["poc_on_trade_side"] = poc_on_trade_side or effective_poc_price is None
+
+            # Relax RVOL requirement for pullbacks (default to 0.5 if not configured)
+            pullback_rvol_min = max(
+                0.0,
+                float(getattr(config, "intraday_levels_pullback_rvol_min_threshold", 0.50))
+            )
+
+            # Override the rvol_minimum check
+            checks["rvol_minimum"] = bool(
+                not rvol_filter_enabled
+                or (current_rvol is not None and current_rvol >= pullback_rvol_min)
+            )
+
+            if not checks["near_tested_level"]:
+                soft_reasons.append("pullback_prefers_tested_level_near_entry")
+            if not checks["minimum_confluence_score"]:
+                soft_reasons.append("pullback_prefers_confluence")
+
+            # Properly manage the rejection reasons array
+            if rvol_filter_enabled and checks["rvol_available"] and not checks["rvol_minimum"]:
+                if "rvol_below_min_threshold" not in reasons:
+                    reasons.append("rvol_below_pullback_min_threshold")
+            elif "rvol_below_min_threshold" in reasons and checks["rvol_minimum"]:
+                reasons.remove("rvol_below_min_threshold")
         else:
             checks["strategy_specific_gate_applied"] = False
-
     if not gate_enabled:
         reasons = []
         soft_reasons = []

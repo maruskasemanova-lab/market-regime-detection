@@ -30,6 +30,7 @@ def test_from_dict_validates_and_clamps_fields() -> None:
             "intraday_levels_micro_confirmation_intrabar_min_move_pct": -1,
             "intraday_levels_micro_confirmation_intrabar_min_push_ratio": 2.5,
             "intraday_levels_micro_confirmation_intrabar_max_spread_bps": -1,
+            "intrabar_eval_step_seconds": 0,
             "liquidity_sweep_detection_enabled": "1",
             "sweep_min_aggression_z": "-3.5",
             "sweep_min_book_pressure_z": "2.2",
@@ -70,6 +71,7 @@ def test_from_dict_validates_and_clamps_fields() -> None:
     assert cfg.intraday_levels_micro_confirmation_intrabar_min_move_pct == 0.0
     assert cfg.intraday_levels_micro_confirmation_intrabar_min_push_ratio == 1.0
     assert cfg.intraday_levels_micro_confirmation_intrabar_max_spread_bps == 0.0
+    assert cfg.intrabar_eval_step_seconds == 1
     assert cfg.liquidity_sweep_detection_enabled is True
     assert cfg.sweep_min_aggression_z == -3.5
     assert cfg.sweep_min_book_pressure_z == 2.2
@@ -128,6 +130,7 @@ def test_round_trip_dict_conversion_is_stable() -> None:
             "intraday_levels_micro_confirmation_intrabar_min_move_pct": 0.03,
             "intraday_levels_micro_confirmation_intrabar_min_push_ratio": 0.2,
             "intraday_levels_micro_confirmation_intrabar_max_spread_bps": 8.0,
+            "intrabar_eval_step_seconds": 7,
         }
     )
 

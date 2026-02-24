@@ -18,6 +18,7 @@ from .strategies.momentum_flow import MomentumFlowStrategy
 from .strategies.exhaustion_fade import ExhaustionFadeStrategy
 from .strategies.iceberg_defense import IcebergDefenseStrategy
 from .strategies.scalp_l2_intrabar import ScalpL2IntrabarStrategy
+from .strategies.evidence_scalp import EvidenceScalpStrategy
 
 
 def build_strategy_registry() -> Dict[str, BaseStrategy]:
@@ -35,4 +36,5 @@ def build_strategy_registry() -> Dict[str, BaseStrategy]:
         "exhaustion_fade": ExhaustionFadeStrategy(),
         "iceberg_defense": IcebergDefenseStrategy(),
         "scalp_l2_intrabar": ScalpL2IntrabarStrategy(),
+        "evidence_scalp": EvidenceScalpStrategy(),
     }
