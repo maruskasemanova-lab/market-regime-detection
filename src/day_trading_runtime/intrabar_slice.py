@@ -74,7 +74,10 @@ def runtime_evaluate_intrabar_slice(
         "close": bar.close, "volume": bar.volume,
         "vwap": getattr(bar, "vwap", None),
     }
-    fv = orch.checkpoint_feature_vector(cp_bar_dict) or orch.current_feature_vector
+    fv = orch.checkpoint_feature_vector(
+        cp_bar_dict,
+        pre_bar_fv=getattr(session, '_pre_bar_fv', None),
+    ) or orch.current_feature_vector
     if fv is not None:
         l2_aggression_z = feature_vector_value(fv, "l2_aggression_z", 0.0)
         l2_book_pressure_z = feature_vector_value(fv, "l2_book_pressure_z", 0.0)

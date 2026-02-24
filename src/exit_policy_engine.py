@@ -54,15 +54,24 @@ class ExitPolicyEngine:
         return level, reason
 
     @staticmethod
-    def resolve_exit_for_bar(pos, bar) -> Optional[Tuple[str, float]]:
+    def resolve_exit_for_bar(pos, bar, *, is_entry_bar: bool = False) -> Optional[Tuple[str, float]]:
         """Resolve exit for the current bar with conservative tie-break.
 
         If both stop and target are hit on the same bar, stop wins.
+
+        When *is_entry_bar* is True the position was opened on this bar's
+        open.  We cannot know the exact fill second, so:
+        - Skip intrabar-quote SL checks (pre-fill quotes would be noise).
+        - Use bar.close instead of bar.low/high for bar-level SL to avoid
+          false triggers from transient dips before the fill.
         """
         stop_level, stop_reason = ExitPolicyEngine.effective_stop_for_position(pos)
 
+        # On the entry bar we skip intrabar SL: the quotes include prices
+        # from before the position was filled, which would cause spurious
+        # immediate stop-outs.
         intrabar_quotes = getattr(bar, "intrabar_quotes_1s", None)
-        if intrabar_quotes:
+        if intrabar_quotes and not is_entry_bar:
             intrabar_exit = ExitPolicyEngine._resolve_exit_from_intrabar_quotes(
                 pos=pos,
                 stop_level=stop_level,
@@ -72,11 +81,17 @@ class ExitPolicyEngine:
             if intrabar_exit:
                 return intrabar_exit
 
+        # On the entry bar, use bar.close for SL instead of bar.low/high.
+        # bar.low may dip below SL transiently before the position is
+        # filled at bar.open; bar.close reflects the actual end-of-bar
+        # state which is a fair SL reference.
         if pos.side == "long":
-            stop_hit = stop_level is not None and bar.low <= stop_level
+            sl_check_price = bar.close if is_entry_bar else bar.low
+            stop_hit = stop_level is not None and sl_check_price <= stop_level
             tp_hit = pos.take_profit > 0 and bar.high >= pos.take_profit
         else:
-            stop_hit = stop_level is not None and bar.high >= stop_level
+            sl_check_price = bar.close if is_entry_bar else bar.high
+            stop_hit = stop_level is not None and sl_check_price >= stop_level
             tp_hit = pos.take_profit > 0 and bar.low <= pos.take_profit
 
         if stop_hit:

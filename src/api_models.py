@@ -107,6 +107,7 @@ class TradingConfig(BaseModel):
     partial_take_profit_fraction: float = 0.5
     partial_flow_deterioration_min_r: float = 0.5
     partial_flow_deterioration_skip_be: bool = True
+    partial_protect_min_mfe_r: float = 0.0
     trailing_activation_pct: float = 0.15
     break_even_buffer_pct: float = 0.03
     break_even_min_hold_bars: int = 3

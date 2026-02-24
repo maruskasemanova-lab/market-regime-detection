@@ -304,6 +304,22 @@ def runtime_process_trading_bar(
                 cp_bar = copy.copy(bar)
                 cp_quotes = [dict(row) for row in prefix_quotes]
                 cp_bar.intrabar_quotes_1s = cp_quotes
+                # Zero out L2 fields: full-minute L2 is future data at
+                # checkpoint time (look-ahead bias prevention).
+                cp_bar.l2_delta = None
+                cp_bar.l2_buy_volume = None
+                cp_bar.l2_sell_volume = None
+                cp_bar.l2_volume = None
+                cp_bar.l2_imbalance = None
+                cp_bar.l2_bid_depth_total = None
+                cp_bar.l2_ask_depth_total = None
+                cp_bar.l2_book_pressure = None
+                cp_bar.l2_book_pressure_change = None
+                cp_bar.l2_iceberg_buy_count = None
+                cp_bar.l2_iceberg_sell_count = None
+                cp_bar.l2_iceberg_bias = None
+                cp_bar.l2_quality_flags = None
+                cp_bar.l2_quality = None
 
                 mids: List[float] = []
                 for row in cp_quotes:
@@ -429,7 +445,7 @@ def runtime_process_trading_bar(
             'close': [b.close for b in bars_data],
             'volume': [b.volume for b in bars_data]
         }
-        indicators = self._calculate_indicators(bars_data, session=session)
+        indicators = _formula_indicators()
         regime = session.detected_regime or Regime.MIXED
         flow_metrics = dict(indicators.get('order_flow') or {})
         fv = orch.current_feature_vector

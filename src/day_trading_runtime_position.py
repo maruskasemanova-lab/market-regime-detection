@@ -27,12 +27,36 @@ def manage_active_position_lifecycle(
     pos = session.active_position
     ee = manager.exit_engine
 
+    # ── Per-bar caches: avoid redundant O(n) recomputation ────────
+    # Flow metrics are called up to 7× per bar with 3 distinct lookbacks.
+    _flow_cache: Dict[int, Dict[str, Any]] = {}
+
+    def _cached_flow(lookback: int) -> Dict[str, Any]:
+        lb = min(lookback, len(session.bars))
+        if lb not in _flow_cache:
+            _flow_cache[lb] = manager._calculate_order_flow_metrics(
+                session.bars, lookback=lb,
+            )
+        return _flow_cache[lb]
+
+    # bars_held scan: O(n) per call × 6 calls → cache the result.
+    _bars_held_cache: Dict[str, int] = {}
+
+    def _cached_bars_held(trade) -> int:
+        key = f"{trade.entry_time.isoformat()}_{trade.exit_time.isoformat()}"
+        if key not in _bars_held_cache:
+            _bars_held_cache[key] = len(
+                [
+                    b
+                    for b in session.bars
+                    if b.timestamp >= trade.entry_time and b.timestamp <= trade.exit_time
+                ]
+            )
+        return _bars_held_cache[key]
+
     # ── 0. Position Context Monitor: detect regime/flow changes ──
     if session._position_context:
-        ctx_flow = manager._calculate_order_flow_metrics(
-            session.bars,
-            lookback=min(20, len(session.bars)),
-        )
+        ctx_flow = _cached_flow(20)
         ctx_indicators = manager._calculate_indicators(
             session.bars[-100:] if len(session.bars) >= 100 else session.bars,
             session=session,
@@ -70,13 +94,7 @@ def manage_active_position_lifecycle(
                 session.last_exit_bar_index = current_bar_index
                 result["trade_closed"] = trade.to_dict()
                 result["action"] = f"position_closed_{ctx_exit_decision.reason}"
-                bars_held = len(
-                    [
-                        b
-                        for b in session.bars
-                        if b.timestamp >= trade.entry_time and b.timestamp <= trade.exit_time
-                    ]
-                )
+                bars_held = _cached_bars_held(trade)
                 result["position_closed"] = ee.build_position_closed_payload(
                     trade=trade,
                     exit_reason=ctx_exit_decision.reason,
@@ -95,10 +113,7 @@ def manage_active_position_lifecycle(
                 session=session,
                 bar=bar,
                 indicators=formula_indicators(),
-                flow=manager._calculate_order_flow_metrics(
-                    session.bars,
-                    lookback=min(20, len(session.bars)),
-                ),
+                flow=_cached_flow(20),
                 current_bar_index=current_bar_index,
                 position=session.active_position,
             )
@@ -123,13 +138,7 @@ def manage_active_position_lifecycle(
                 session.last_exit_bar_index = current_bar_index
                 result["trade_closed"] = trade.to_dict()
                 result["action"] = "position_closed_custom_formula_exit"
-                bars_held = len(
-                    [
-                        b
-                        for b in session.bars
-                        if b.timestamp >= trade.entry_time and b.timestamp <= trade.exit_time
-                    ]
-                )
+                bars_held = _cached_bars_held(trade)
                 result["position_closed"] = ee.build_position_closed_payload(
                     trade=trade,
                     exit_reason="custom_formula_exit",
@@ -138,7 +147,10 @@ def manage_active_position_lifecycle(
 
     # ── 1. Hard exits (SL/TP) ──
     if session.active_position:
-        exit_result = ee.resolve_exit_for_bar(pos, bar)
+        is_entry_bar = (
+            current_bar_index == getattr(session.active_position, 'entry_bar_index', -1)
+        )
+        exit_result = ee.resolve_exit_for_bar(pos, bar, is_entry_bar=is_entry_bar)
         if exit_result:
             exit_reason, exit_fill_price = exit_result
             trade = manager._close_position(
@@ -151,13 +163,7 @@ def manage_active_position_lifecycle(
             session.last_exit_bar_index = current_bar_index
             result["trade_closed"] = trade.to_dict()
             result["action"] = f"position_closed_{exit_reason}"
-            bars_held = len(
-                [
-                    b
-                    for b in session.bars
-                    if b.timestamp >= trade.entry_time and b.timestamp <= trade.exit_time
-                ]
-            )
+            bars_held = _cached_bars_held(trade)
             result["position_closed"] = ee.build_position_closed_payload(
                 trade=trade,
                 exit_reason=exit_reason,
@@ -166,10 +172,7 @@ def manage_active_position_lifecycle(
 
     # ── 2. Partial scale-out ──
     if session.active_position:
-        flow_8 = manager._calculate_order_flow_metrics(
-            session.bars,
-            lookback=min(8, len(session.bars)),
-        )
+        flow_8 = _cached_flow(8)
         partial_decision = ee.should_take_partial_profit(
             session,
             session.active_position,
@@ -229,6 +232,30 @@ def manage_active_position_lifecycle(
                     partial_decision.get("reason") == "partial_take_profit_flow_deterioration"
                     and getattr(session, "partial_flow_deterioration_skip_be", True)
                 )
+                # Gate: skip forced BE if MFE hasn't reached minimum R threshold.
+                if not skip_be:
+                    _pp_min_r = max(0.0, float(
+                        getattr(session, "partial_protect_min_mfe_r", 0.0) or 0.0
+                    ))
+                    if _pp_min_r > 0:
+                        _pp_entry = float(session.active_position.entry_price or 0.0)
+                        _pp_init_sl = float(
+                            session.active_position.initial_stop_loss
+                            or session.active_position.stop_loss or 0.0
+                        )
+                        _pp_side = str(session.active_position.side or "long").strip().lower()
+                        _pp_risk = abs(_pp_entry - _pp_init_sl) if (_pp_entry > 0 and _pp_init_sl > 0) else 0.0
+                        if _pp_risk > 0:
+                            if _pp_side == "long":
+                                _pp_mfe = max(0.0, float(
+                                    getattr(session.active_position, "highest_price", _pp_entry) or _pp_entry
+                                ) - _pp_entry)
+                            else:
+                                _pp_mfe = max(0.0, _pp_entry - float(
+                                    getattr(session.active_position, "lowest_price", _pp_entry) or _pp_entry
+                                ))
+                            if (_pp_mfe / _pp_risk) < _pp_min_r:
+                                skip_be = True
                 if not skip_be:
                     be_after_partial = ee.force_move_to_break_even(
                         session=session,
@@ -262,10 +289,7 @@ def manage_active_position_lifecycle(
             preferred_sleeve_id = str(
                 momentum_md.get("selected_sleeve_id") or momentum_md.get("sleeve_id") or ""
             ).strip()
-        ff_flow = manager._calculate_order_flow_metrics(
-            session.bars,
-            lookback=min(8, len(session.bars)),
-        )
+        ff_flow = _cached_flow(8)
         selected_cfg, selected_sleeve_id, _ = manager._select_momentum_sleeve(
             momentum_cfg_all,
             strategy_key=strategy_key,
@@ -298,13 +322,7 @@ def manage_active_position_lifecycle(
             session.last_exit_bar_index = current_bar_index
             result["trade_closed"] = trade.to_dict()
             result["action"] = "position_closed_momentum_fail_fast"
-            bars_held = len(
-                [
-                    b
-                    for b in session.bars
-                    if b.timestamp >= trade.entry_time and b.timestamp <= trade.exit_time
-                ]
-            )
+            bars_held = _cached_bars_held(trade)
             result["position_closed"] = ee.build_position_closed_payload(
                 trade=trade,
                 exit_reason="momentum_fail_fast",
@@ -313,10 +331,7 @@ def manage_active_position_lifecycle(
 
     # ── 4. Time-based exit ──
     if session.active_position:
-        time_flow = manager._calculate_order_flow_metrics(
-            session.bars,
-            lookback=min(8, len(session.bars)),
-        )
+        time_flow = _cached_flow(8)
         if ee.should_time_exit(session, session.active_position, current_bar_index, time_flow):
             trade = manager._close_position(
                 session,
@@ -328,13 +343,7 @@ def manage_active_position_lifecycle(
             session.last_exit_bar_index = current_bar_index
             result["trade_closed"] = trade.to_dict()
             result["action"] = "position_closed_time_exit"
-            bars_held = len(
-                [
-                    b
-                    for b in session.bars
-                    if b.timestamp >= trade.entry_time and b.timestamp <= trade.exit_time
-                ]
-            )
+            bars_held = _cached_bars_held(trade)
             result["position_closed"] = ee.build_position_closed_payload(
                 trade=trade,
                 exit_reason="time_exit",
@@ -343,10 +352,7 @@ def manage_active_position_lifecycle(
 
     # ── 5. Adverse flow exit ──
     if session.active_position:
-        adv_flow = manager._calculate_order_flow_metrics(
-            session.bars,
-            lookback=min(12, len(session.bars)),
-        )
+        adv_flow = _cached_flow(12)
         should_exit_adverse, adverse_metrics = ee.should_adverse_flow_exit(
             session,
             session.active_position,
@@ -364,13 +370,7 @@ def manage_active_position_lifecycle(
             session.last_exit_bar_index = current_bar_index
             result["trade_closed"] = trade.to_dict()
             result["action"] = "position_closed_adverse_flow"
-            bars_held = len(
-                [
-                    b
-                    for b in session.bars
-                    if b.timestamp >= trade.entry_time and b.timestamp <= trade.exit_time
-                ]
-            )
+            bars_held = _cached_bars_held(trade)
             result["position_closed"] = ee.build_position_closed_payload(
                 trade=trade,
                 exit_reason="adverse_flow",
@@ -407,10 +407,7 @@ def manage_active_position_lifecycle(
                 result["context_risk_trailing"] = trailing_metrics
         # Flow-deterioration trailing tightener: tighten trailing stop
         # when multi-bar flow trend is consistently declining.
-        trail_flow = manager._calculate_order_flow_metrics(
-            session.bars,
-            lookback=min(12, len(session.bars)),
-        )
+        trail_flow = _cached_flow(12)
         if ee.maybe_tighten_trailing_on_flow_deterioration(
             session,
             session.active_position,

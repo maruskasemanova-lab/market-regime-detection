@@ -94,7 +94,15 @@ def runtime_process_bar(
         tcbbo_has_data=bar_data.get("tcbbo_has_data"),
     )
 
-    if session.orchestrator and session.orchestrator.config.use_evidence_engine:
+    # Orchestrator update is DEFERRED in TRADING phase to avoid look-ahead
+    # bias: intrabar checkpoints must not see full-minute bar data.
+    # Non-TRADING phases update immediately since no intrabar eval occurs.
+    _is_trading_phase = session.phase == SessionPhase.TRADING
+    if (
+        not _is_trading_phase
+        and session.orchestrator
+        and session.orchestrator.config.use_evidence_engine
+    ):
         session.orchestrator.update_bar(bar_data)
 
     bar_time = market_ts.time()
@@ -214,12 +222,22 @@ def runtime_process_bar(
 
     elif session.phase == SessionPhase.TRADING:
         session.bars.append(bar)
-        result["intraday_levels"] = self._update_intraday_levels(
-            session,
-            len(session.bars) - 1,
+        # DEFER intraday levels update: checkpoints must see previous-bar state.
+        # Save pre-bar feature vector so checkpoints inherit previous-bar L2.
+        session._pre_bar_fv = (
+            session.orchestrator.current_feature_vector
+            if session.orchestrator
+            else None
         )
 
         if bar_time >= session.market_close or bar_time >= time(15, 55):
+            # End-of-day: update orchestrator + levels before closing position
+            if session.orchestrator and session.orchestrator.config.use_evidence_engine:
+                session.orchestrator.update_bar(bar_data)
+            result["intraday_levels"] = self._update_intraday_levels(
+                session,
+                len(session.bars) - 1,
+            )
             if session.active_position:
                 trade = self._close_position(
                     session,
@@ -255,6 +273,18 @@ def runtime_process_bar(
                 warmup_only=warmup_only,
             )
             result.update(trade_result)
+
+            # POST-BAR: update orchestrator and intraday levels with full bar
+            # now that intrabar checkpoint evaluation is done.
+            if session.orchestrator and session.orchestrator.config.use_evidence_engine:
+                session.orchestrator.update_bar(bar_data)
+            result["intraday_levels"] = self._update_intraday_levels(
+                session,
+                len(session.bars) - 1,
+            )
+
+        # Clean up temporary pre-bar FV reference
+        session._pre_bar_fv = None
 
     elif session.phase == SessionPhase.END_OF_DAY:
         session.end_price = bar.close

@@ -495,13 +495,32 @@ class TradeExecutionEngine:
         pos.size = max(0.0, pos.size - close_size)
         pos.partial_exit_done = True
 
-        # After partial, protect remaining position with cost-aware break-even logic.
-        self.exit_engine.force_move_to_break_even(
-            session=session,
-            pos=pos,
-            bar=bar,
-            reason="partial_take_profit_protect",
-        )
+        # After partial, protect remaining position with cost-aware break-even logic
+        # — but only if MFE has reached the configurable minimum R threshold.
+        _pp_min_r = max(0.0, float(
+            getattr(session, "partial_protect_min_mfe_r", 0.0) or 0.0
+        ))
+        _should_be = True
+        if _pp_min_r > 0 and pos.entry_price > 0:
+            _init_sl = float(getattr(pos, "initial_stop_loss", 0.0) or 0.0)
+            if _init_sl <= 0:
+                _init_sl = float(getattr(pos, "stop_loss", 0.0) or 0.0)
+            _risk = abs(pos.entry_price - _init_sl) if _init_sl > 0 else 0.0
+            if _risk > 0:
+                _side = str(getattr(pos, "side", "long")).strip().lower()
+                if _side == "long":
+                    _mfe = max(0.0, float(getattr(pos, "highest_price", pos.entry_price) or pos.entry_price) - pos.entry_price)
+                else:
+                    _mfe = max(0.0, pos.entry_price - float(getattr(pos, "lowest_price", pos.entry_price) or pos.entry_price))
+                if (_mfe / _risk) < _pp_min_r:
+                    _should_be = False
+        if _should_be:
+            self.exit_engine.force_move_to_break_even(
+                session=session,
+                pos=pos,
+                bar=bar,
+                reason="partial_take_profit_protect",
+            )
 
         if pos.size <= 0:
             session.active_position = None

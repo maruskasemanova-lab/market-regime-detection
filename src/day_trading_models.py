@@ -362,6 +362,7 @@ class TradingSession:
     partial_take_profit_fraction: float = 0.5
     partial_flow_deterioration_min_r: float = 0.5
     partial_flow_deterioration_skip_be: bool = True
+    partial_protect_min_mfe_r: float = 0.0
     time_exit_bars: int = 40
     time_exit_formula_enabled: bool = False
     time_exit_formula: str = ""
@@ -407,6 +408,7 @@ class TradingSession:
         self.partial_take_profit_fraction = config.partial_take_profit_fraction
         self.partial_flow_deterioration_min_r = config.partial_flow_deterioration_min_r
         self.partial_flow_deterioration_skip_be = config.partial_flow_deterioration_skip_be
+        self.partial_protect_min_mfe_r = config.partial_protect_min_mfe_r
         self.trailing_activation_pct = config.trailing_activation_pct
         self.break_even_buffer_pct = config.break_even_buffer_pct
         self.break_even_min_hold_bars = config.break_even_min_hold_bars

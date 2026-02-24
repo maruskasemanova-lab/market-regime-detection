@@ -528,6 +528,7 @@ class FeatureStore:
         self,
         checkpoint_bar: Dict[str, Any],
         parent_fv: FeatureVector,
+        pre_bar_fv: Optional[FeatureVector] = None,
     ) -> FeatureVector:
         """
         Produce a FeatureVector for a 5s checkpoint **without mutating** rolling
@@ -536,7 +537,11 @@ class FeatureStore:
         ``RollingStats.z_score``).
 
         Stateful indicators that require full bar history (EMA, ATR, ADX, OBV,
-        L2, multi-TF) are inherited from *parent_fv* — the minute-bar FV.
+        multi-TF) are inherited from *parent_fv* — the minute-bar FV.
+
+        L2 features are inherited from *pre_bar_fv* when provided (previous
+        bar's FV) to avoid same-minute look-ahead bias.  Falls back to
+        *parent_fv* if *pre_bar_fv* is None.
         """
         c = float(checkpoint_bar.get("close", 0) or 0)
         h = float(checkpoint_bar.get("high", 0) or 0)
@@ -615,6 +620,9 @@ class FeatureStore:
         volume_pct_rank = self._pstats_volume.percentile_rank(v)
         range_pct_rank = self._pstats_range.percentile_rank(bar_range)
 
+        # ── L2 source: previous-bar FV when available (no look-ahead) ──
+        l2_src = pre_bar_fv if pre_bar_fv is not None else parent_fv
+
         return FeatureVector(
             bar_index=parent_fv.bar_index,
             close=c, open=o, high=h, low=lo, volume=v, vwap=cp_vwap,
@@ -645,28 +653,28 @@ class FeatureStore:
             atr_z=parent_fv.atr_z,
             adx_z=parent_fv.adx_z,
             atr_pct_rank=parent_fv.atr_pct_rank,
-            # L2 (unchanged per checkpoint)
-            l2_has_coverage=parent_fv.l2_has_coverage,
-            l2_delta=parent_fv.l2_delta,
-            l2_signed_aggression=parent_fv.l2_signed_aggression,
-            l2_directional_consistency=parent_fv.l2_directional_consistency,
-            l2_imbalance=parent_fv.l2_imbalance,
-            l2_absorption_rate=parent_fv.l2_absorption_rate,
-            l2_sweep_intensity=parent_fv.l2_sweep_intensity,
-            l2_book_pressure=parent_fv.l2_book_pressure,
-            l2_large_trader_activity=parent_fv.l2_large_trader_activity,
-            l2_delta_zscore=parent_fv.l2_delta_zscore,
-            l2_flow_score=parent_fv.l2_flow_score,
-            l2_iceberg_bias=parent_fv.l2_iceberg_bias,
-            l2_participation_ratio=parent_fv.l2_participation_ratio,
-            l2_delta_acceleration=parent_fv.l2_delta_acceleration,
-            l2_delta_price_divergence=parent_fv.l2_delta_price_divergence,
-            l2_delta_z=parent_fv.l2_delta_z,
-            l2_aggression_z=parent_fv.l2_aggression_z,
-            l2_imbalance_z=parent_fv.l2_imbalance_z,
-            l2_book_pressure_z=parent_fv.l2_book_pressure_z,
-            l2_sweep_z=parent_fv.l2_sweep_z,
-            l2_flow_score_z=parent_fv.l2_flow_score_z,
+            # L2 (from pre-bar FV to avoid same-minute look-ahead)
+            l2_has_coverage=l2_src.l2_has_coverage,
+            l2_delta=l2_src.l2_delta,
+            l2_signed_aggression=l2_src.l2_signed_aggression,
+            l2_directional_consistency=l2_src.l2_directional_consistency,
+            l2_imbalance=l2_src.l2_imbalance,
+            l2_absorption_rate=l2_src.l2_absorption_rate,
+            l2_sweep_intensity=l2_src.l2_sweep_intensity,
+            l2_book_pressure=l2_src.l2_book_pressure,
+            l2_large_trader_activity=l2_src.l2_large_trader_activity,
+            l2_delta_zscore=l2_src.l2_delta_zscore,
+            l2_flow_score=l2_src.l2_flow_score,
+            l2_iceberg_bias=l2_src.l2_iceberg_bias,
+            l2_participation_ratio=l2_src.l2_participation_ratio,
+            l2_delta_acceleration=l2_src.l2_delta_acceleration,
+            l2_delta_price_divergence=l2_src.l2_delta_price_divergence,
+            l2_delta_z=l2_src.l2_delta_z,
+            l2_aggression_z=l2_src.l2_aggression_z,
+            l2_imbalance_z=l2_src.l2_imbalance_z,
+            l2_book_pressure_z=l2_src.l2_book_pressure_z,
+            l2_sweep_z=l2_src.l2_sweep_z,
+            l2_flow_score_z=l2_src.l2_flow_score_z,
             # Multi-timeframe (unchanged per checkpoint)
             tf5_trend_slope=parent_fv.tf5_trend_slope,
             tf5_rsi=parent_fv.tf5_rsi,

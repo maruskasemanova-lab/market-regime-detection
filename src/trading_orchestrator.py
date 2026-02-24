@@ -455,11 +455,14 @@ class TradingOrchestrator:
 
     def checkpoint_feature_vector(
         self, checkpoint_bar: Dict[str, Any],
+        pre_bar_fv: Optional[FeatureVector] = None,
     ) -> Optional[FeatureVector]:
         """Per-checkpoint FV snapshot (read-only, no rolling state mutation)."""
         if self._current_fv is None:
             return None
-        return self.feature_store.compute_checkpoint_fv(checkpoint_bar, self._current_fv)
+        return self.feature_store.compute_checkpoint_fv(
+            checkpoint_bar, self._current_fv, pre_bar_fv=pre_bar_fv,
+        )
 
     @property
     def current_regime_state(self) -> Optional[RegimeState]:

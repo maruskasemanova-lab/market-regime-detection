@@ -85,6 +85,13 @@ def build_core_kwargs(
             raw.get("partial_flow_deterioration_skip_be"),
             defaults.partial_flow_deterioration_skip_be,
         ),
+        partial_protect_min_mfe_r=max(
+            0.0,
+            cls._to_float(
+                raw.get("partial_protect_min_mfe_r"),
+                defaults.partial_protect_min_mfe_r,
+            ),
+        ),
         trailing_activation_pct=max(
             0.0,
             cls._to_float(raw.get("trailing_activation_pct"), defaults.trailing_activation_pct),
