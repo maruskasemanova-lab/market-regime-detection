@@ -7,7 +7,29 @@ from typing import Any, Dict
 
 from ..day_trading_models import BarData, TradingSession
 from ..day_trading_runtime_sweep import feature_vector_value
-from ..strategies.base_strategy import Regime
+from ..strategies.base_strategy import Regime, SignalType
+
+
+def _normalize_direction_token(raw: Any) -> str:
+    token = str(raw or "").strip().lower()
+    if token in {"bullish", "long", "buy", "up", "positive"}:
+        return "bullish"
+    if token in {"bearish", "short", "sell", "down", "negative"}:
+        return "bearish"
+    return ""
+
+
+def _decision_direction(decision: Any) -> str:
+    direction = _normalize_direction_token(getattr(decision, "direction", None))
+    if direction:
+        return direction
+    signal = getattr(decision, "signal", None)
+    signal_type = getattr(signal, "signal_type", None)
+    if signal_type == SignalType.BUY:
+        return "bullish"
+    if signal_type == SignalType.SELL:
+        return "bearish"
+    return ""
 
 
 def runtime_evaluate_intrabar_slice(
@@ -107,6 +129,30 @@ def runtime_evaluate_intrabar_slice(
         effective_trade_threshold = max(0.0, effective_trade_threshold - tcbbo_threshold_relief)
         threshold_used_reason = f"{threshold_used_reason}-tcbbo({tcbbo_threshold_relief:.1f})"
 
+    golden_setup_payload = (
+        dict(session.golden_setup_result)
+        if isinstance(getattr(session, "golden_setup_result", None), dict)
+        else {}
+    )
+    golden_setup_relief = 0.0
+    golden_setup_direction = _normalize_direction_token(golden_setup_payload.get("best_direction"))
+    gate_direction = _decision_direction(decision)
+    if (
+        bool(golden_setup_payload.get("active", False))
+        and bool(golden_setup_direction)
+        and (not gate_direction or gate_direction == golden_setup_direction)
+    ):
+        golden_setup_relief = max(
+            0.0,
+            float(golden_setup_payload.get("threshold_reduction", 0.0) or 0.0),
+        )
+    if golden_setup_relief > 0.0:
+        effective_trade_threshold = max(
+            0.0,
+            effective_trade_threshold - golden_setup_relief,
+        )
+        threshold_used_reason = f"{threshold_used_reason}-golden({golden_setup_relief:.1f})"
+
     passed_trade_threshold = float(decision.combined_score) >= effective_trade_threshold
 
     # Strategy-aware threshold corrections (second code path)
@@ -161,9 +207,11 @@ def runtime_evaluate_intrabar_slice(
         "tod_threshold_boost": tod_boost,
         "headwind_threshold_boost": round(float(headwind_boost), 4),
         "tcbbo_threshold_relief": round(float(tcbbo_threshold_relief), 4),
+        "golden_setup_relief": round(float(golden_setup_relief), 4),
         "headwind_activation_score": float(getattr(self, "headwind_activation_score", 0.5)),
         "cross_asset_headwind": headwind_metrics,
         "tcbbo_regime_override": dict(tcbbo_regime_override),
+        "golden_setup": dict(golden_setup_payload) if golden_setup_payload else {},
         "required_confirming_sources": required_confirming_sources,
         "engine": "evidence_v1",
     }

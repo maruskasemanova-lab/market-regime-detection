@@ -719,10 +719,10 @@ def runtime_evaluate_intraday_levels_entry_quality(
             checks["minimum_confluence_score"] = near_confluence_score >= 1
             checks["poc_on_trade_side"] = poc_on_trade_side or effective_poc_price is None
 
-            # Relax RVOL requirement for pullbacks (default to 0.5 if not configured)
+            # Relax RVOL requirement for pullbacks (default to 0.3 if not configured)
             pullback_rvol_min = max(
                 0.0,
-                float(getattr(config, "intraday_levels_pullback_rvol_min_threshold", 0.50))
+                float(getattr(config, "intraday_levels_pullback_rvol_min_threshold", 0.30))
             )
 
             # Override the rvol_minimum check

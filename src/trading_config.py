@@ -137,6 +137,7 @@ class TradingConfig:
     intraday_levels_rvol_filter_enabled: bool = True
     intraday_levels_rvol_lookback_bars: int = 20
     intraday_levels_rvol_min_threshold: float = 0.80
+    intraday_levels_pullback_rvol_min_threshold: float = 0.30
     intraday_levels_rvol_strong_threshold: float = 1.50
     intraday_levels_adaptive_window_enabled: bool = True
     intraday_levels_adaptive_window_min_bars: int = 6
@@ -187,6 +188,31 @@ class TradingConfig:
     ev_relaxation_threshold: float = 10.0
     ev_relaxation_factor: float = 0.50
     intraday_levels_bounce_conflict_buffer_bars: int = 0
+    # -- Golden setup detection --
+    golden_setups_enabled: bool = False
+    golden_setups_max_entries_per_day: int = 3
+    golden_setups_cooldown_bars: int = 5
+    golden_setups_min_l2_score: float = 60.0
+    golden_setup_absorption_reversal_enabled: bool = True
+    golden_setup_ar_threshold_reduction: float = 12.0
+    golden_setup_ar_confidence_boost: float = 15.0
+    golden_setup_ar_tcbbo_boost: float = 10.0
+    golden_setup_gamma_squeeze_enabled: bool = True
+    golden_setup_gsb_threshold_reduction: float = 10.0
+    golden_setup_gsb_confidence_boost: float = 12.0
+    golden_setup_gsb_tcbbo_boost: float = 8.0
+    golden_setup_liquidity_trap_enabled: bool = True
+    golden_setup_lt_threshold_reduction: float = 10.0
+    golden_setup_lt_confidence_boost: float = 12.0
+    golden_setup_lt_tcbbo_boost: float = 8.0
+    golden_setup_iceberg_defense_enabled: bool = True
+    golden_setup_id_threshold_reduction: float = 8.0
+    golden_setup_id_confidence_boost: float = 10.0
+    golden_setup_id_tcbbo_boost: float = 8.0
+    golden_setup_fuel_injection_enabled: bool = True
+    golden_setup_fi_threshold_reduction: float = 8.0
+    golden_setup_fi_confidence_boost: float = 10.0
+    golden_setup_fi_tcbbo_boost: float = 8.0
     # -- Orchestrator weights --
     orchestrator_strategy_weight: float = 0.6
     orchestrator_strategy_only_threshold: float = 0.0

@@ -285,6 +285,9 @@ class TradingSession:
     pending_signal_bar_index: int = -1
     potential_sweep_active: bool = False
     potential_sweep_context: Dict[str, Any] = field(default_factory=dict)
+    golden_setup_result: Optional[Dict[str, Any]] = None
+    golden_setup_entries_today: int = 0
+    golden_setup_last_entry_bar_index: int = -99
     consecutive_losses: int = 0
     loss_cooldown_until_bar_index: int = -1
     last_exit_bar_index: int = -1
@@ -505,6 +508,13 @@ class TradingSession:
             'has_pending_signal': self.pending_signal is not None,
             'potential_sweep_active': self.potential_sweep_active,
             'potential_sweep_context': dict(self.potential_sweep_context),
+            'golden_setup': (
+                dict(self.golden_setup_result)
+                if isinstance(self.golden_setup_result, dict)
+                else None
+            ),
+            'golden_setup_entries_today': int(self.golden_setup_entries_today),
+            'golden_setup_last_entry_bar_index': int(self.golden_setup_last_entry_bar_index),
             'consecutive_losses': self.consecutive_losses,
             'loss_cooldown_until_bar_index': self.loss_cooldown_until_bar_index,
             'trades_count': len(self.trades),

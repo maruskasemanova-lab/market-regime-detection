@@ -489,6 +489,9 @@ class DayTradingConfigService:
                 "rvol_filter_enabled": bool(config.intraday_levels_rvol_filter_enabled),
                 "rvol_lookback_bars": int(config.intraday_levels_rvol_lookback_bars),
                 "rvol_min_threshold": float(config.intraday_levels_rvol_min_threshold),
+                "pullback_rvol_min_threshold": float(
+                    config.intraday_levels_pullback_rvol_min_threshold
+                ),
                 "rvol_strong_threshold": float(
                     config.intraday_levels_rvol_strong_threshold
                 ),

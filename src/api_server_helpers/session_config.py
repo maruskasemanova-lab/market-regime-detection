@@ -26,7 +26,9 @@ def merge_body_payload(
     body_payload: Mapping[str, Any],
     query_param_keys: Set[str],
 ) -> None:
-    for key in list(config_payload.keys()):
+    # Use TradingConfig field names as whitelist, but allow body-only fields
+    # that may not yet exist as explicit query params on the endpoint signature.
+    for key in _TRADING_CONFIG_FIELD_NAMES:
         if key in body_payload and key not in query_param_keys:
             config_payload[key] = body_payload[key]
 

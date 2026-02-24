@@ -370,6 +370,28 @@ def process_pending_signal_entry(
                 )
             ),
         }
+        golden_setup_md = (
+            signal.metadata.get("golden_setup")
+            if isinstance(getattr(signal, "metadata", None), dict)
+            else None
+        )
+        if isinstance(golden_setup_md, dict) and bool(golden_setup_md.get("applied", False)):
+            session.golden_setup_entries_today = int(
+                getattr(session, "golden_setup_entries_today", 0) or 0
+            ) + 1
+            session.golden_setup_last_entry_bar_index = int(current_bar_index)
+            if isinstance(getattr(session, "golden_setup_result", None), dict):
+                session.golden_setup_result["entries_today"] = int(
+                    session.golden_setup_entries_today
+                )
+            result["golden_setup_entry"] = {
+                "count_today": int(session.golden_setup_entries_today),
+                "bar_index": int(current_bar_index),
+                "setup": golden_setup_md.get("best_setup"),
+                "direction": golden_setup_md.get("best_direction"),
+                "confidence_boost": golden_setup_md.get("applied_confidence_boost", 0.0),
+                "threshold_relief": golden_setup_md.get("applied_threshold_relief", 0.0),
+            }
         if isinstance(position.signal_metadata, dict) and isinstance(
             position.signal_metadata.get("break_even"),
             dict,
