@@ -11,8 +11,6 @@ from .trading_config import TradingConfig
 from .strategies.base_strategy import Regime, Signal, SignalType
 from .day_trading_runtime_intrabar import (
     calculate_intrabar_1s_snapshot as _calculate_intrabar_1s_snapshot_impl,
-    intrabar_confirmation_snapshot as _intrabar_confirmation_snapshot_impl,
-    micro_confirmation_snapshot as _micro_confirmation_snapshot_impl,
 )
 from .day_trading_runtime_portfolio import (
     cooldown_bars_remaining as _cooldown_bars_remaining_impl,
@@ -24,7 +22,6 @@ from .day_trading_runtime_sweep import (
     feature_vector_value as _feature_vector_value_impl,
     order_flow_metadata_snapshot as _order_flow_metadata_snapshot_impl,
     resolve_liquidity_sweep_confirmation as _resolve_liquidity_sweep_confirmation_impl,
-    runtime_detect_liquidity_sweep as _runtime_detect_liquidity_sweep_impl,
     to_optional_float as _to_optional_float_impl,
 )
 from .day_trading_runtime_entry_quality import (
@@ -36,19 +33,8 @@ from .day_trading_runtime_pending import (
 from .day_trading_runtime_position import (
     manage_active_position_lifecycle as _manage_active_position_lifecycle_impl,
 )
-from .day_trading_runtime.intrabar_trace import (
-    attach_intrabar_eval_trace as _attach_intrabar_eval_trace_impl,
-    build_intrabar_eval_trace as _build_intrabar_eval_trace_impl,
-)
-from .day_trading_runtime.signal_generation import (
-    runtime_calculate_indicators as _runtime_calculate_indicators_impl,
-    runtime_generate_signal as _runtime_generate_signal_impl,
-)
 from .day_trading_runtime.intrabar_slice import (
     runtime_evaluate_intrabar_slice as _runtime_evaluate_intrabar_slice_impl,
-)
-from .day_trading_runtime.bar_processing import (
-    runtime_process_bar as _runtime_process_bar_impl,
 )
 from .golden_setup_detector import build_golden_config_from_trading_config
 
@@ -72,230 +58,6 @@ def _signal_direction(signal: Optional[Signal]) -> str:
     if signal.signal_type == SignalType.SELL:
         return "bearish"
     return ""
-
-
-def _build_intrabar_eval_trace(
-    *,
-    timestamp: datetime,
-    bar: BarData,
-    result: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    return _build_intrabar_eval_trace_impl(
-        timestamp=timestamp,
-        bar=bar,
-        result=result,
-    )
-
-
-def _unrealized_pnl_dollars(
-    session: TradingSession,
-    current_price: float,
-    *,
-    trading_costs: Any,
-    bar_volume: Optional[float] = None,
-) -> float:
-    return _unrealized_pnl_dollars_impl(
-        session=session,
-        current_price=current_price,
-        trading_costs=trading_costs,
-        bar_volume=bar_volume,
-    )
-
-
-def _cooldown_bars_remaining(session: TradingSession, current_bar_index: int) -> int:
-    return _cooldown_bars_remaining_impl(
-        session=session,
-        current_bar_index=current_bar_index,
-    )
-
-
-def _micro_confirmation_snapshot(
-    *,
-    session: TradingSession,
-    signal: Signal,
-    current_bar_index: int,
-    signal_bar_index: int,
-    required_bars: int,
-    mode: str = "consecutive_close",
-    volume_delta_min_pct: float = 0.60,
-) -> Dict[str, Any]:
-    return _micro_confirmation_snapshot_impl(
-        session=session,
-        signal=signal,
-        current_bar_index=current_bar_index,
-        signal_bar_index=signal_bar_index,
-        required_bars=required_bars,
-        mode=mode,
-        volume_delta_min_pct=volume_delta_min_pct,
-    )
-
-
-def _realized_pnl_dollars(session: TradingSession) -> float:
-    return _realized_pnl_dollars_impl(session)
-
-
-def _calculate_intrabar_1s_snapshot(
-    bar: Optional[BarData],
-    *,
-    intrabar_window_seconds: int = 5,
-) -> Dict[str, Any]:
-    return _calculate_intrabar_1s_snapshot_impl(
-        bar=bar,
-        intrabar_window_seconds=intrabar_window_seconds,
-    )
-
-
-def _intrabar_confirmation_snapshot(
-    *,
-    session: TradingSession,
-    signal: Signal,
-    current_bar_index: int,
-    signal_bar_index: int,
-    window_seconds: int,
-    min_coverage_points: int,
-    min_move_pct: float,
-    min_push_ratio: float,
-    max_spread_bps: float,
-) -> Dict[str, Any]:
-    return _intrabar_confirmation_snapshot_impl(
-        session=session,
-        signal=signal,
-        current_bar_index=current_bar_index,
-        signal_bar_index=signal_bar_index,
-        window_seconds=window_seconds,
-        min_coverage_points=min_coverage_points,
-        min_move_pct=min_move_pct,
-        min_push_ratio=min_push_ratio,
-        max_spread_bps=max_spread_bps,
-    )
-
-
-def _to_optional_float(value: Any) -> Optional[float]:
-    return _to_optional_float_impl(value)
-
-
-def _order_flow_metadata_snapshot(flow_metrics: Dict[str, Any]) -> Dict[str, Any]:
-    return _order_flow_metadata_snapshot_impl(flow_metrics)
-
-
-def _feature_vector_value(fv: Any, field: str, default: float = 0.0) -> float:
-    return _feature_vector_value_impl(fv, field, default)
-
-
-def runtime_detect_liquidity_sweep(
-    self,
-    *,
-    session: TradingSession,
-    current_price: float,
-    fv: Any,
-    flow_metrics: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    config = (
-        session.config
-        if isinstance(getattr(session, "config", None), TradingConfig)
-        else TradingConfig()
-    )
-    logger.debug(
-        "runtime_detect_liquidity_sweep entered; enabled=%s",
-        bool(getattr(config, "liquidity_sweep_detection_enabled", False)),
-    )
-    return _runtime_detect_liquidity_sweep_impl(
-        session=session,
-        current_price=current_price,
-        fv=fv,
-        flow_metrics=flow_metrics,
-    )
-
-
-def _resolve_liquidity_sweep_confirmation(
-    *,
-    session: TradingSession,
-    current_bar_index: int,
-    current_price: float,
-    flow_metrics: Dict[str, Any],
-) -> Dict[str, Any]:
-    return _resolve_liquidity_sweep_confirmation_impl(
-        session=session,
-        current_bar_index=current_bar_index,
-        current_price=current_price,
-        flow_metrics=flow_metrics,
-    )
-
-
-def runtime_evaluate_intraday_levels_entry_quality(
-    self,
-    *,
-    session: TradingSession,
-    signal: Signal,
-    current_price: float,
-    current_bar_index: int,
-) -> Dict[str, Any]:
-    return _runtime_evaluate_intraday_levels_entry_quality_impl(
-        self=self,
-        session=session,
-        signal=signal,
-        current_price=current_price,
-        current_bar_index=current_bar_index,
-    )
-
-
-def _portfolio_drawdown_snapshot(
-    self,
-    *,
-    run_id: str,
-    mark_session: Optional[TradingSession] = None,
-    mark_price: Optional[float] = None,
-    mark_bar_volume: Optional[float] = None,
-) -> Dict[str, Any]:
-    return _portfolio_drawdown_snapshot_impl(
-        manager=self,
-        run_id=run_id,
-        mark_session=mark_session,
-        mark_price=mark_price,
-        mark_bar_volume=mark_bar_volume,
-    )
-
-
-def _process_pending_signal_entry(
-    self,
-    *,
-    session: TradingSession,
-    bar: BarData,
-    timestamp: datetime,
-    current_bar_index: int,
-    result: Dict[str, Any],
-    formula_indicators: Any,
-) -> bool:
-    return _process_pending_signal_entry_impl(
-        manager=self,
-        session=session,
-        bar=bar,
-        timestamp=timestamp,
-        current_bar_index=current_bar_index,
-        result=result,
-        formula_indicators=formula_indicators,
-    )
-
-
-def _manage_active_position_lifecycle(
-    self,
-    *,
-    session: TradingSession,
-    bar: BarData,
-    timestamp: datetime,
-    current_bar_index: int,
-    result: Dict[str, Any],
-    formula_indicators: Any,
-) -> None:
-    _manage_active_position_lifecycle_impl(
-        manager=self,
-        session=session,
-        bar=bar,
-        timestamp=timestamp,
-        current_bar_index=current_bar_index,
-        result=result,
-        formula_indicators=formula_indicators,
-    )
 
 
 def runtime_process_trading_bar(
@@ -370,8 +132,8 @@ def runtime_process_trading_bar(
         result["reason"] = "Trading disabled for warmup bars"
         return result
 
-    portfolio_drawdown = _portfolio_drawdown_snapshot(
-        self,
+    portfolio_drawdown = _portfolio_drawdown_snapshot_impl(
+        manager=self,
         run_id=session.run_id,
         mark_session=session,
         mark_price=current_price,
@@ -418,8 +180,8 @@ def runtime_process_trading_bar(
         return result
 
     # Execute previous-bar signal at current bar open (no same-bar signal fill).
-    should_return = _process_pending_signal_entry(
-        self,
+    should_return = _process_pending_signal_entry_impl(
+        manager=self,
         session=session,
         bar=bar,
         timestamp=timestamp,
@@ -431,8 +193,8 @@ def runtime_process_trading_bar(
         return result
     
     # If we have an active position, manage it via the exit policy engine.
-    _manage_active_position_lifecycle(
-        self,
+    _manage_active_position_lifecycle_impl(
+        manager=self,
         session=session,
         bar=bar,
         timestamp=timestamp,
@@ -442,10 +204,10 @@ def runtime_process_trading_bar(
     )
     
     # Custom Rule: Max Daily Loss Circuit Breaker (realized + unrealized).
-    current_realized_pnl = _realized_pnl_dollars(session)
-    current_unrealized_pnl = _unrealized_pnl_dollars(
-        session,
-        current_price,
+    current_realized_pnl = _realized_pnl_dollars_impl(session)
+    current_unrealized_pnl = _unrealized_pnl_dollars_impl(
+        session=session,
+        current_price=current_price,
         trading_costs=self.trading_costs,
         bar_volume=bar.volume,
     )
@@ -493,7 +255,7 @@ def runtime_process_trading_bar(
         result['indicators'] = regime_update.get("indicators", {})
 
     if not session.active_position and session.selected_strategy:
-        cooldown_remaining = _cooldown_bars_remaining(session, current_bar_index)
+        cooldown_remaining = _cooldown_bars_remaining_impl(session, current_bar_index)
         if cooldown_remaining > 0:
             result['action'] = 'consecutive_loss_cooldown'
             result['reason'] = f'Consecutive-loss cooldown: {cooldown_remaining} bars remaining'
@@ -550,8 +312,8 @@ def runtime_process_trading_bar(
         regime = session.detected_regime or Regime.MIXED
         flow_metrics = dict(indicators.get('order_flow') or {})
         fv = orch.current_feature_vector
-        l2_aggression_z = _feature_vector_value(fv, "l2_aggression_z", 0.0)
-        l2_book_pressure_z = _feature_vector_value(fv, "l2_book_pressure_z", 0.0)
+        l2_aggression_z = _feature_vector_value_impl(fv, "l2_aggression_z", 0.0)
+        l2_book_pressure_z = _feature_vector_value_impl(fv, "l2_book_pressure_z", 0.0)
         flow_metrics["l2_aggression_z"] = l2_aggression_z
         flow_metrics["l2_book_pressure_z"] = l2_book_pressure_z
         golden_cfg = build_golden_config_from_trading_config(
@@ -567,7 +329,7 @@ def runtime_process_trading_bar(
                 else {}
             ),
             current_price=float(current_price),
-            vwap=_to_optional_float(getattr(bar, "vwap", None)),
+            vwap=_to_optional_float_impl(getattr(bar, "vwap", None)),
             regime=str(session.micro_regime or ""),
             golden_entries_today=int(getattr(session, "golden_setup_entries_today", 0) or 0),
             last_golden_bar_index=int(
@@ -615,7 +377,7 @@ def runtime_process_trading_bar(
             
         result["liquidity_sweep"] = dict(sweep_detection)
         
-        sweep_confirmation = _resolve_liquidity_sweep_confirmation(
+        sweep_confirmation = _resolve_liquidity_sweep_confirmation_impl(
             session=session,
             current_bar_index=current_bar_index,
             current_price=current_price,
@@ -626,10 +388,10 @@ def runtime_process_trading_bar(
         if bool(sweep_confirmation.get("confirmed", False)):
             sweep_direction = str(sweep_confirmation.get("direction", "long")).strip().lower()
             atr_now = (
-                _to_optional_float(self._latest_indicator_value(indicators, "atr", bars_data))
+                _to_optional_float_impl(self._latest_indicator_value(indicators, "atr", bars_data))
                 or 0.0
             )
-            level_price = _to_optional_float(sweep_confirmation.get("level_price")) or current_price
+            level_price = _to_optional_float_impl(sweep_confirmation.get("level_price")) or current_price
             risk_buffer_abs = max(current_price * 0.001, atr_now * 0.25)
             strategy_name = str(session.selected_strategy or "").strip()
             if not strategy_name:
@@ -679,7 +441,7 @@ def runtime_process_trading_bar(
                     },
                 },
             )
-            sweep_signal.metadata["order_flow"] = _order_flow_metadata_snapshot(flow_metrics)
+            sweep_signal.metadata["order_flow"] = _order_flow_metadata_snapshot_impl(flow_metrics)
             sweep_signal.metadata["intraday_levels_payload"] = self._intraday_levels_indicator_payload(
                 session
             )
@@ -816,7 +578,7 @@ def runtime_process_trading_bar(
                     cp_high = float(bar.high)
                     cp_low = float(bar.low)
                     cp_close = float(bar.close)
-                    cp_vwap = _to_optional_float(getattr(bar, "vwap", None))
+                    cp_vwap = _to_optional_float_impl(getattr(bar, "vwap", None))
 
                 elapsed_ratio = min(1.0, max(1.0 / 60.0, float(sec + 1) / 60.0))
                 cp_volume = float(bar.volume or 0.0) * elapsed_ratio
@@ -1172,14 +934,14 @@ def runtime_process_trading_bar(
             signal.metadata.setdefault('momentum_diversification', momentum_diversification_metrics)
             signal.metadata.setdefault(
                 "order_flow",
-                _order_flow_metadata_snapshot(flow_metrics),
+                _order_flow_metadata_snapshot_impl(flow_metrics),
             )
             # Enrich signal metadata with regime context for post-mortem
             signal.metadata['regime'] = regime.value if regime else None
             signal.metadata['micro_regime'] = session.micro_regime
             signal.metadata.setdefault('layer_scores', {})
             signal.metadata['layer_scores'].update(result['layer_scores'])
-            level_context = runtime_evaluate_intraday_levels_entry_quality(
+            level_context = _runtime_evaluate_intraday_levels_entry_quality_impl(
                 self=self,
                 session=session,
                 signal=signal,
@@ -1208,7 +970,7 @@ def runtime_process_trading_bar(
                     'timestamp': timestamp.isoformat(),
                 }
                 return result
-            target_override = _to_optional_float(level_context.get("target_price_override"))
+            target_override = _to_optional_float_impl(level_context.get("target_price_override"))
             if target_override is not None and target_override > 0.0:
                 signal.take_profit = target_override
                 signal.metadata["target_price_source"] = "intraday_levels_poc"
