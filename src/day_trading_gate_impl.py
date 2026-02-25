@@ -602,6 +602,17 @@ class GateEvaluationEngine:
 
         # Premium threshold check
         min_prem = float(session.tcbbo_min_net_premium)
+        # Enhancement A: Adaptive threshold — scale min premium by recent flow magnitude
+        if bool(getattr(session, 'tcbbo_adaptive_threshold', True)):
+            _adapt_lb = max(1, int(getattr(session, 'tcbbo_adaptive_lookback_bars', 30)))
+            _adapt_bars = [b for b in (session.bars[-_adapt_lb:] if session.bars else [])
+                           if getattr(b, 'tcbbo_has_data', False)]
+            if _adapt_bars:
+                avg_mag = sum(abs(float(getattr(b, 'tcbbo_net_premium', 0) or 0)) for b in _adapt_bars) / len(_adapt_bars)
+                adaptive_min = avg_mag * float(getattr(session, 'tcbbo_adaptive_min_pct', 0.15))
+                min_prem = max(min_prem, adaptive_min)
+                metrics['adaptive_threshold'] = round(adaptive_min, 2)
+                metrics['avg_premium_magnitude'] = round(avg_mag, 2)
         passes_premium = directional_premium >= min_prem
 
         # Contrarian strategies (MR, rotation, absorption) trade against retail
@@ -614,6 +625,23 @@ class GateEvaluationEngine:
         confidence_boost = float(session.tcbbo_sweep_boost) if sweep_aligned else 0.0
 
         passed = passes_premium or is_contrarian
+
+        # Enhancement C: Anti-flow-fade filter — reject fading directional premium
+        flow_fade_enabled = bool(getattr(session, 'tcbbo_flow_fade_filter', True))
+        if flow_fade_enabled and passed and not is_contrarian and len(net_premiums) >= 3:
+            mid = len(net_premiums) // 2
+            first_half_avg = sum(p * direction for p in net_premiums[:mid]) / max(1, mid) if mid > 0 else 0.0
+            second_half_avg = sum(p * direction for p in net_premiums[mid:]) / max(1, len(net_premiums) - mid)
+            fade_ratio = second_half_avg / first_half_avg if first_half_avg > 0 else 1.0
+            min_fade_ratio = float(getattr(session, 'tcbbo_flow_fade_min_ratio', 0.3))
+
+            metrics['flow_fade_ratio'] = round(fade_ratio, 3)
+            metrics['flow_fade_first_half'] = round(first_half_avg, 2)
+            metrics['flow_fade_second_half'] = round(second_half_avg, 2)
+
+            if 0 < fade_ratio < min_fade_ratio:
+                passed = False
+                metrics['reason'] = 'tcbbo_flow_fading'
 
         metrics.update({
             "window_size": len(window),
@@ -633,7 +661,7 @@ class GateEvaluationEngine:
             "passed": passed,
         })
 
-        if not passed:
+        if not passed and metrics.get("reason") != "tcbbo_flow_fading":
             metrics["reason"] = "tcbbo_confirmation_failed"
         elif is_contrarian and not passes_premium:
             metrics["reason"] = "tcbbo_contrarian_bypass"

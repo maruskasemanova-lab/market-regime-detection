@@ -242,6 +242,69 @@ class ExitPolicyEngine:
         return False
 
     @staticmethod
+    def maybe_tighten_trailing_on_tcbbo_reversal(
+        session,
+        pos,
+        bar,
+    ) -> Dict[str, Any]:
+        """Tighten trailing stop when TCBBO options flow reverses against position.
+
+        Soft tightener — reduces cushion between trailing stop and extreme price,
+        but never triggers a hard exit.  Returns metrics dict for diagnostics.
+        """
+        metrics: Dict[str, Any] = {"applied": False, "enabled": False}
+
+        if not getattr(session, 'tcbbo_exit_tighten_enabled', False):
+            return metrics
+        metrics["enabled"] = True
+
+        if not pos.trailing_stop_active:
+            return metrics
+
+        lookback = max(1, int(getattr(session, 'tcbbo_exit_lookback_bars', 5)))
+        window = session.bars[-lookback:] if session.bars else []
+        covered = [b for b in window if getattr(b, 'tcbbo_has_data', False)]
+        if len(covered) < 2:
+            metrics["reason"] = "insufficient_tcbbo_coverage"
+            return metrics
+
+        # Compute directional flow against position
+        net = sum(float(getattr(b, 'tcbbo_net_premium', 0) or 0) for b in covered)
+        direction = 1.0 if pos.side == "long" else -1.0
+        contra_flow = net * direction  # Negative = flow against position
+
+        tighten_threshold = -float(getattr(session, 'tcbbo_exit_contra_threshold', 50000))
+        tighten_pct = max(0.0, min(0.5, float(
+            getattr(session, 'tcbbo_exit_tighten_pct', 0.15)
+        )))
+
+        metrics.update({
+            "contra_flow": round(contra_flow, 2),
+            "tighten_threshold": tighten_threshold,
+            "tighten_pct": tighten_pct,
+            "covered_bars": len(covered),
+        })
+
+        if contra_flow >= tighten_threshold or tighten_pct <= 0:
+            return metrics
+
+        # Tighten trailing stop
+        if pos.side == "long" and pos.trailing_stop_price > 0:
+            distance = pos.highest_price - pos.trailing_stop_price
+            if distance > 0:
+                pos.trailing_stop_price += distance * tighten_pct
+                metrics["applied"] = True
+                metrics["new_trailing_stop"] = round(pos.trailing_stop_price, 4)
+        elif pos.side == "short" and pos.trailing_stop_price > 0:
+            distance = pos.trailing_stop_price - pos.lowest_price
+            if distance > 0:
+                pos.trailing_stop_price -= distance * tighten_pct
+                metrics["applied"] = True
+                metrics["new_trailing_stop"] = round(pos.trailing_stop_price, 4)
+
+        return metrics
+
+    @staticmethod
     def should_time_exit(session, pos, current_bar_index: int, flow_metrics: Dict[str, Any]) -> bool:
         """Check if position should be closed due to time limit."""
         if session.time_exit_bars <= 0:

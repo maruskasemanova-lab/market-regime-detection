@@ -52,6 +52,7 @@ def runtime_generate_signal(
         "exhaustion_fade",
         "scalp_l2_intrabar",
         "evidence_scalp",
+        "options_flow_alpha",
     }
 
     for strategy_name in active_strategies:
@@ -250,5 +251,25 @@ def runtime_calculate_indicators(
     )
     indicators["intrabar_1s"] = _calculate_intrabar_1s_snapshot_impl(latest_bar)
     indicators["intraday_levels"] = intraday_levels
+
+    # TCBBO options flow data for strategies that use it
+    if latest_bar is not None and getattr(latest_bar, "tcbbo_has_data", False):
+        indicators["tcbbo"] = {
+            "is_valid": True,
+            "has_data": True,
+            "net_premium": getattr(latest_bar, "tcbbo_net_premium", 0.0),
+            "cumulative_net_premium": getattr(latest_bar, "tcbbo_cumulative_net_premium", 0.0),
+            "call_buy_premium": getattr(latest_bar, "tcbbo_call_buy_premium", 0.0),
+            "put_buy_premium": getattr(latest_bar, "tcbbo_put_buy_premium", 0.0),
+            "call_sell_premium": getattr(latest_bar, "tcbbo_call_sell_premium", 0.0),
+            "put_sell_premium": getattr(latest_bar, "tcbbo_put_sell_premium", 0.0),
+            "sweep_count": getattr(latest_bar, "tcbbo_sweep_count", 0),
+            "sweep_premium": getattr(latest_bar, "tcbbo_sweep_premium", 0.0),
+            "trade_count": getattr(latest_bar, "tcbbo_trade_count", 0),
+        }
+
+    # Session bars for strategies that need history (e.g. Z-score)
+    if isinstance(session, TradingSession) and session.bars:
+        indicators["session_bars"] = session.bars
 
     return indicators

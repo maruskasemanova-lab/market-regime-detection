@@ -50,6 +50,7 @@ def default_regime_preferences() -> Dict[Regime, List[str]]:
             "volume_profile",
             "vwap_magnet",
             "evidence_scalp",
+            "options_flow_alpha",
         ],
         Regime.CHOPPY: [
             "absorption_reversal",
@@ -59,6 +60,7 @@ def default_regime_preferences() -> Dict[Regime, List[str]]:
             "scalp_l2_intrabar",
             "volume_profile",
             "evidence_scalp",
+            "options_flow_alpha",
         ],
         Regime.MIXED: [
             "exhaustion_fade",
@@ -70,6 +72,7 @@ def default_regime_preferences() -> Dict[Regime, List[str]]:
             "vwap_magnet",
             "rotation",
             "evidence_scalp",
+            "options_flow_alpha",
         ],
     }
 
@@ -83,6 +86,7 @@ def default_micro_regime_preferences() -> Dict[str, List[str]]:
             "gap_liquidity",
             "scalp_l2_intrabar",
             "evidence_scalp",
+            "options_flow_alpha",
         ],
         "TRENDING_DOWN": [
             "momentum_flow",
@@ -112,9 +116,9 @@ def default_micro_regime_preferences() -> Dict[str, List[str]]:
             "scalp_l2_intrabar",
             "evidence_scalp",
         ],
-        "MIXED": ["exhaustion_fade", "volume_profile", "rotation", "evidence_scalp"],
-        "TRANSITION": ["vwap_magnet", "volume_profile", "rotation", "evidence_scalp"],
-        "UNKNOWN": ["vwap_magnet", "volume_profile", "evidence_scalp"],
+        "MIXED": ["exhaustion_fade", "volume_profile", "rotation", "evidence_scalp", "options_flow_alpha"],
+        "TRANSITION": ["vwap_magnet", "volume_profile", "rotation", "evidence_scalp", "options_flow_alpha"],
+        "UNKNOWN": ["vwap_magnet", "volume_profile", "evidence_scalp", "options_flow_alpha"],
     }
 
 
@@ -156,9 +160,9 @@ def default_ticker_preferences() -> Dict[str, Dict[Regime, List[str]]]:
             Regime.MIXED: ["mean_reversion", "vwap_magnet"],
         },
         "MU": {
-            Regime.TRENDING: ["momentum", "gap_liquidity", "volume_profile"],
-            Regime.CHOPPY: [],
-            Regime.MIXED: ["volume_profile"],
+            Regime.TRENDING: ["momentum", "gap_liquidity", "volume_profile", "options_flow_alpha"],
+            Regime.CHOPPY: ["options_flow_alpha"],
+            Regime.MIXED: ["volume_profile", "options_flow_alpha"],
         },
         "AMZN": {
             Regime.TRENDING: ["pullback", "mean_reversion", "vwap_magnet"],

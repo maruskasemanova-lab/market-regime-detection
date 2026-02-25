@@ -92,6 +92,20 @@ class TradingConfig:
     tcbbo_min_net_premium: float = 0.0
     tcbbo_sweep_boost: float = 5.0
     tcbbo_lookback_bars: int = 5
+    # TCBBO adaptive entry threshold
+    tcbbo_adaptive_threshold: bool = True
+    tcbbo_adaptive_lookback_bars: int = 30
+    tcbbo_adaptive_min_pct: float = 0.15
+    # TCBBO anti-flow-fade filter
+    tcbbo_flow_fade_filter: bool = True
+    tcbbo_flow_fade_min_ratio: float = 0.3
+    # TCBBO exit management
+    tcbbo_exit_tighten_enabled: bool = False
+    tcbbo_exit_lookback_bars: int = 5
+    tcbbo_exit_contra_threshold: float = 50000.0
+    tcbbo_exit_tighten_pct: float = 0.15
+    # Options flow alpha strategy
+    options_flow_alpha_enabled: bool = False
     intraday_levels_enabled: bool = True
     intraday_levels_swing_left_bars: int = 2
     intraday_levels_swing_right_bars: int = 2

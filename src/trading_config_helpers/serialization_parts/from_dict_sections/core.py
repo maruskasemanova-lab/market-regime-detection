@@ -446,4 +446,35 @@ def build_core_kwargs(
         tcbbo_lookback_bars=max(
             1, cls._to_int(raw.get("tcbbo_lookback_bars"), defaults.tcbbo_lookback_bars)
         ),
+        tcbbo_adaptive_threshold=cls._to_bool(
+            raw.get("tcbbo_adaptive_threshold"), defaults.tcbbo_adaptive_threshold
+        ),
+        tcbbo_adaptive_lookback_bars=max(
+            1, cls._to_int(raw.get("tcbbo_adaptive_lookback_bars"), defaults.tcbbo_adaptive_lookback_bars)
+        ),
+        tcbbo_adaptive_min_pct=max(
+            0.0,
+            min(1.0, cls._to_float(raw.get("tcbbo_adaptive_min_pct"), defaults.tcbbo_adaptive_min_pct)),
+        ),
+        tcbbo_flow_fade_filter=cls._to_bool(
+            raw.get("tcbbo_flow_fade_filter"), defaults.tcbbo_flow_fade_filter
+        ),
+        tcbbo_flow_fade_min_ratio=max(
+            0.0,
+            min(1.0, cls._to_float(raw.get("tcbbo_flow_fade_min_ratio"), defaults.tcbbo_flow_fade_min_ratio)),
+        ),
+        tcbbo_exit_tighten_enabled=cls._to_bool(
+            raw.get("tcbbo_exit_tighten_enabled"), defaults.tcbbo_exit_tighten_enabled
+        ),
+        tcbbo_exit_lookback_bars=max(
+            1, cls._to_int(raw.get("tcbbo_exit_lookback_bars"), defaults.tcbbo_exit_lookback_bars)
+        ),
+        tcbbo_exit_contra_threshold=max(
+            0.0, cls._to_float(raw.get("tcbbo_exit_contra_threshold"), defaults.tcbbo_exit_contra_threshold)
+        ),
+        tcbbo_exit_tighten_pct=max(
+            0.0,
+            min(0.5, cls._to_float(raw.get("tcbbo_exit_tighten_pct"), defaults.tcbbo_exit_tighten_pct)),
+        ),
+        options_flow_alpha_enabled=bool(raw.get("options_flow_alpha_enabled", defaults.options_flow_alpha_enabled)),
     )

@@ -415,3 +415,10 @@ def manage_active_position_lifecycle(
             trail_flow,
         ):
             result["flow_deterioration_tighten"] = True
+
+        # TCBBO options-flow trailing tightener (Enhancement B)
+        tcbbo_tighten = ee.maybe_tighten_trailing_on_tcbbo_reversal(
+            session, session.active_position, bar,
+        )
+        if tcbbo_tighten.get("applied", False):
+            result["tcbbo_exit_tighten"] = tcbbo_tighten

@@ -17,6 +17,7 @@ from .exhaustion_fade import ExhaustionFadeStrategy
 from .iceberg_defense import IcebergDefenseStrategy
 from .scalp_l2_intrabar import ScalpL2IntrabarStrategy
 from .evidence_scalp import EvidenceScalpStrategy
+from .options_flow_alpha import OptionsFlowAlphaStrategy
 
 __all__ = [
     'BaseStrategy',
@@ -37,4 +38,5 @@ __all__ = [
     'IcebergDefenseStrategy',
     'ScalpL2IntrabarStrategy',
     'EvidenceScalpStrategy',
+    'OptionsFlowAlphaStrategy',
 ]

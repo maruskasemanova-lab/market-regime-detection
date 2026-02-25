@@ -389,6 +389,16 @@ class TradingSession:
     tcbbo_min_net_premium: float = 0.0
     tcbbo_sweep_boost: float = 5.0
     tcbbo_lookback_bars: int = 5
+    tcbbo_adaptive_threshold: bool = True
+    tcbbo_adaptive_lookback_bars: int = 30
+    tcbbo_adaptive_min_pct: float = 0.15
+    tcbbo_flow_fade_filter: bool = True
+    tcbbo_flow_fade_min_ratio: float = 0.3
+    tcbbo_exit_tighten_enabled: bool = False
+    tcbbo_exit_lookback_bars: int = 5
+    tcbbo_exit_contra_threshold: float = 50000.0
+    tcbbo_exit_tighten_pct: float = 0.15
+    options_flow_alpha_enabled: bool = False
     config: TradingConfig = field(default_factory=TradingConfig)
     max_daily_trades_override: Optional[int] = None
     mu_choppy_hard_block_enabled_override: Optional[bool] = None
@@ -478,6 +488,16 @@ class TradingSession:
         self.tcbbo_min_net_premium = config.tcbbo_min_net_premium
         self.tcbbo_sweep_boost = config.tcbbo_sweep_boost
         self.tcbbo_lookback_bars = config.tcbbo_lookback_bars
+        self.tcbbo_adaptive_threshold = config.tcbbo_adaptive_threshold
+        self.tcbbo_adaptive_lookback_bars = config.tcbbo_adaptive_lookback_bars
+        self.tcbbo_adaptive_min_pct = config.tcbbo_adaptive_min_pct
+        self.tcbbo_flow_fade_filter = config.tcbbo_flow_fade_filter
+        self.tcbbo_flow_fade_min_ratio = config.tcbbo_flow_fade_min_ratio
+        self.tcbbo_exit_tighten_enabled = config.tcbbo_exit_tighten_enabled
+        self.tcbbo_exit_lookback_bars = config.tcbbo_exit_lookback_bars
+        self.tcbbo_exit_contra_threshold = config.tcbbo_exit_contra_threshold
+        self.tcbbo_exit_tighten_pct = config.tcbbo_exit_tighten_pct
+        self.options_flow_alpha_enabled = config.options_flow_alpha_enabled
         self.strategy_selection_mode = config.strategy_selection_mode
         self.max_active_strategies = config.max_active_strategies
         self.potential_sweep_active = False
@@ -536,6 +556,16 @@ class TradingSession:
             'tcbbo_min_net_premium': self.tcbbo_min_net_premium,
             'tcbbo_sweep_boost': self.tcbbo_sweep_boost,
             'tcbbo_lookback_bars': self.tcbbo_lookback_bars,
+            'tcbbo_adaptive_threshold': self.tcbbo_adaptive_threshold,
+            'tcbbo_adaptive_lookback_bars': self.tcbbo_adaptive_lookback_bars,
+            'tcbbo_adaptive_min_pct': self.tcbbo_adaptive_min_pct,
+            'tcbbo_flow_fade_filter': self.tcbbo_flow_fade_filter,
+            'tcbbo_flow_fade_min_ratio': self.tcbbo_flow_fade_min_ratio,
+            'tcbbo_exit_tighten_enabled': self.tcbbo_exit_tighten_enabled,
+            'tcbbo_exit_lookback_bars': self.tcbbo_exit_lookback_bars,
+            'tcbbo_exit_contra_threshold': self.tcbbo_exit_contra_threshold,
+            'tcbbo_exit_tighten_pct': self.tcbbo_exit_tighten_pct,
+            'options_flow_alpha_enabled': self.options_flow_alpha_enabled,
             'max_daily_trades_override': self.max_daily_trades_override,
             'mu_choppy_hard_block_enabled_override': self.mu_choppy_hard_block_enabled_override,
             'orchestrator_active': self.orchestrator is not None,

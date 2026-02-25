@@ -111,6 +111,7 @@ class DayTradingManager:
         "exhaustion_fade",
         "scalp_l2_intrabar",
         "evidence_scalp",
+        "options_flow_alpha",
     )
     MOMENTUM_ROUTE_KEYS = ("impulse", "continuation", "defensive")
     DEFAULT_MOMENTUM_STRATEGIES = ("momentum_flow", "momentum", "pullback")
