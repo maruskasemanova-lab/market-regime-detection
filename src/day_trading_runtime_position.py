@@ -256,6 +256,7 @@ def manage_active_position_lifecycle(
                                 ))
                             if (_pp_mfe / _pp_risk) < _pp_min_r:
                                 skip_be = True
+                        print(f"DEBUG_MFE: _pp_min_r={_pp_min_r}, _mfe={_pp_mfe if '_pp_mfe' in locals() else -1}, _risk={_pp_risk if '_pp_risk' in locals() else -1}, skip_be={skip_be}")
                 if not skip_be:
                     be_after_partial = ee.force_move_to_break_even(
                         session=session,

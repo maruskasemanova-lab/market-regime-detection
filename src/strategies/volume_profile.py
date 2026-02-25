@@ -259,7 +259,7 @@ class VolumeProfileStrategy(BaseStrategy):
         effective_rr_ratio = self.get_effective_rr_ratio() or self.rr_ratio
         
         signal = None
-        confidence = 50.0
+        confidence = 30.0  # Lowered from 50 to force candle confirmation
         reasoning_parts = [f"Profile: {profile['profile_type']}"]
         
         # P-PROFILE LOGIC: Trade SHORT at resistance levels
@@ -368,6 +368,11 @@ class VolumeProfileStrategy(BaseStrategy):
         
         # BALANCED PROFILE: Trade mean reversion at VAH/VAL
         else:
+            # Filter: Do not mean-revert if the market is strongly trending
+            adx_val = indicators.get('adx', [0])[-1] if indicators.get('adx') else 0
+            if adx_val > 25:
+                return None
+                
             # Near Value Area High - look for short
             if current_price >= profile['vah']:
                 distance_pct = (current_price - profile['vah']) / current_price * 100
@@ -375,9 +380,12 @@ class VolumeProfileStrategy(BaseStrategy):
                     confidence += 15
                     reasoning_parts.append(f"Near VAH: {profile['vah']:.2f}")
                     
-                    if closes[-1] < opens[-1] and volume_ratio > 1.2:
-                        confidence += 20
-                        reasoning_parts.append("Bearish rejection")
+                    if closes[-1] < opens[-1]:
+                        confidence += 10
+                        reasoning_parts.append("Bearish candle")
+                        if volume_ratio > 1.2:
+                            confidence += 10
+                            reasoning_parts.append("Bearish rejection volume")
                         
                         if confidence >= self.min_confidence:
                             stop_loss = current_price + atr_val * self.atr_stop_mult
@@ -410,9 +418,12 @@ class VolumeProfileStrategy(BaseStrategy):
                     confidence += 15
                     reasoning_parts.append(f"Near VAL: {profile['val']:.2f}")
                     
-                    if closes[-1] > opens[-1] and volume_ratio > 1.2:
-                        confidence += 20
-                        reasoning_parts.append("Bullish bounce")
+                    if closes[-1] > opens[-1]:
+                        confidence += 10
+                        reasoning_parts.append("Bullish candle")
+                        if volume_ratio > 1.2:
+                            confidence += 10
+                            reasoning_parts.append("Bullish bounce volume")
                         
                         if confidence >= self.min_confidence:
                             stop_loss = current_price - atr_val * self.atr_stop_mult

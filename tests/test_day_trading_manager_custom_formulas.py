@@ -48,7 +48,7 @@ class _StubOrchestrator:
         self.current_regime_state = None
         self.current_cross_asset_state = None
 
-    def checkpoint_feature_vector(self, checkpoint_bar):
+    def checkpoint_feature_vector(self, checkpoint_bar, pre_bar_fv=None):
         return None
 
 

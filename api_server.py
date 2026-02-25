@@ -714,6 +714,7 @@ async def configure_session(
     enable_partial_take_profit: bool = True,
     partial_take_profit_rr: float = 1.0,
     partial_take_profit_fraction: float = 0.5,
+    partial_protect_min_mfe_r: float = 0.0,
     trailing_activation_pct: float = 0.15,
     break_even_buffer_pct: float = 0.03,
     break_even_min_hold_bars: int = 3,

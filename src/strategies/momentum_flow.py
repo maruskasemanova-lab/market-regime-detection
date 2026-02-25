@@ -14,12 +14,12 @@ class MomentumFlowStrategy(BaseStrategy):
 
     def __init__(
         self,
-        min_signed_aggression: float = 0.08,
-        min_directional_consistency: float = 0.52,
-        min_imbalance: float = 0.03,
-        min_sweep_intensity: float = 0.08,
+        min_signed_aggression: float = 0.05,
+        min_directional_consistency: float = 0.45,
+        min_imbalance: float = 0.02,
+        min_sweep_intensity: float = 0.05,
         min_book_pressure: float = 0.0,
-        min_confidence: float = 54.0,
+        min_confidence: float = 50.0,
         atr_stop_multiplier: float = 1.0,  # Reduced from 1.8 for tighter SL
         rr_ratio: float = 2.2,
         trailing_stop_pct: float = 0.9,

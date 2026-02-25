@@ -66,11 +66,24 @@ from .day_trading_intraday_memory import IntradayMemoryService
 from .day_trading_manager_helpers.aos_loader import (
     load_aos_config as _load_aos_config_impl,
 )
+from .day_trading_manager_helpers.intrabar_bar_factory import (
+    build_intrabar_slice_bar_data,
+)
 from .day_trading_manager_helpers.preferences import (
     bootstrap_ticker_preferences,
     default_micro_regime_preferences,
     default_regime_preferences,
     default_ticker_preferences,
+)
+from .day_trading_manager_helpers.session_config import (
+    build_ticker_session_config_payload,
+)
+from .day_trading_manager_helpers.session_lifecycle import (
+    attach_orchestrator_to_new_session,
+    recover_existing_session_orchestrator,
+)
+from .day_trading_manager_helpers.run_defaults import (
+    collect_non_none_run_default_overrides,
 )
 
 
@@ -470,18 +483,19 @@ class DayTradingManager:
     ) -> TradingSession:
         """Get existing session or create new one."""
         key = self._get_session_key(run_id, ticker, date)
+        resolved_regime_detection_minutes = (
+            regime_detection_minutes or self.regime_detection_minutes
+        )
 
         if key in self.sessions:
             session = self.sessions[key]
             # Recover partially created sessions (e.g. previous config failure)
             # so subsequent bar processing does not fail with a missing orchestrator.
-            if session.orchestrator is None and self.orchestrator is not None:
-                session.orchestrator = self.orchestrator
-                if not session.bars and not session.pre_market_bars:
-                    if cold_start_each_day:
-                        self.orchestrator.full_reset()
-                    else:
-                        self.orchestrator.new_session()
+            recover_existing_session_orchestrator(
+                session,
+                self.orchestrator,
+                cold_start_each_day=cold_start_each_day,
+            )
             return session
 
         if key not in self.sessions:
@@ -496,114 +510,27 @@ class DayTradingManager:
                 run_id=run_id,
                 ticker=ticker,
                 date=date,
-                regime_detection_minutes=regime_detection_minutes or self.regime_detection_minutes
+                regime_detection_minutes=resolved_regime_detection_minutes,
             )
             session = self.sessions[key]
             ticker_cfg = self.ticker_params.get(str(ticker).upper(), {})
-            config_payload: Dict[str, Any] = {
-                "regime_detection_minutes": regime_detection_minutes or self.regime_detection_minutes,
-                "regime_refresh_bars": self.regime_refresh_bars,
-                "risk_per_trade_pct": self.risk_per_trade_pct,
-                "max_position_notional_pct": self.max_position_notional_pct,
-                "max_fill_participation_rate": self.max_fill_participation_rate,
-                "min_fill_ratio": self.min_fill_ratio,
-                "enable_partial_take_profit": self.enable_partial_take_profit,
-                "partial_take_profit_rr": self.partial_take_profit_rr,
-                "partial_take_profit_fraction": self.partial_take_profit_fraction,
-                "trailing_activation_pct": self.trailing_activation_pct,
-                "break_even_buffer_pct": self.break_even_buffer_pct,
-                "break_even_min_hold_bars": self.break_even_min_hold_bars,
-                "break_even_activation_min_mfe_pct": self.break_even_activation_min_mfe_pct,
-                "break_even_activation_min_r": self.break_even_activation_min_r,
-                "break_even_activation_min_r_trending_5m": (
-                    self.break_even_activation_min_r_trending_5m
-                ),
-                "break_even_activation_min_r_choppy_5m": (
-                    self.break_even_activation_min_r_choppy_5m
-                ),
-                "break_even_activation_use_levels": self.break_even_activation_use_levels,
-                "break_even_activation_use_l2": self.break_even_activation_use_l2,
-                "break_even_level_buffer_pct": self.break_even_level_buffer_pct,
-                "break_even_level_max_distance_pct": self.break_even_level_max_distance_pct,
-                "break_even_level_min_confluence": self.break_even_level_min_confluence,
-                "break_even_level_min_tests": self.break_even_level_min_tests,
-                "break_even_l2_signed_aggression_min": self.break_even_l2_signed_aggression_min,
-                "break_even_l2_imbalance_min": self.break_even_l2_imbalance_min,
-                "break_even_l2_book_pressure_min": self.break_even_l2_book_pressure_min,
-                "break_even_l2_spread_bps_max": self.break_even_l2_spread_bps_max,
-                "break_even_costs_pct": self.break_even_costs_pct,
-                "break_even_min_buffer_pct": self.break_even_min_buffer_pct,
-                "break_even_atr_buffer_k": self.break_even_atr_buffer_k,
-                "break_even_5m_atr_buffer_k": self.break_even_5m_atr_buffer_k,
-                "break_even_tick_size": self.break_even_tick_size,
-                "break_even_min_tick_buffer": self.break_even_min_tick_buffer,
-                "break_even_anti_spike_bars": self.break_even_anti_spike_bars,
-                "break_even_anti_spike_hits_required": self.break_even_anti_spike_hits_required,
-                "break_even_anti_spike_require_close_beyond": (
-                    self.break_even_anti_spike_require_close_beyond
-                ),
-                "break_even_5m_no_go_proximity_pct": self.break_even_5m_no_go_proximity_pct,
-                "break_even_5m_mfe_atr_factor": self.break_even_5m_mfe_atr_factor,
-                "break_even_5m_l2_bias_threshold": self.break_even_5m_l2_bias_threshold,
-                "break_even_5m_l2_bias_tighten_factor": (
-                    self.break_even_5m_l2_bias_tighten_factor
-                ),
-                "trailing_enabled_in_choppy": self.trailing_enabled_in_choppy,
-                "time_exit_bars": self.time_exit_bars,
-                "adverse_flow_exit_enabled": self.adverse_flow_exit_enabled,
-                "adverse_flow_threshold": self.adverse_flow_exit_threshold,
-                "adverse_flow_min_hold_bars": self.adverse_flow_min_hold_bars,
-                "adverse_flow_consistency_threshold": self.adverse_flow_consistency_threshold,
-                "adverse_book_pressure_threshold": self.adverse_book_pressure_threshold,
-                "stop_loss_mode": self.stop_loss_mode,
-                "fixed_stop_loss_pct": self.fixed_stop_loss_pct,
-            }
-            if ticker_cfg:
-                config_payload["adverse_flow_consistency_threshold"] = self._safe_float(
-                    ticker_cfg.get("adverse_flow_consistency_threshold"),
-                    config_payload["adverse_flow_consistency_threshold"],
-                )
-                config_payload["adverse_book_pressure_threshold"] = self._safe_float(
-                    ticker_cfg.get("adverse_book_pressure_threshold"),
-                    config_payload["adverse_book_pressure_threshold"],
-                )
-            l2_cfg = ticker_cfg.get("l2", {}) if isinstance(ticker_cfg, dict) else {}
-            if isinstance(l2_cfg, dict):
-                config_payload.update(
-                    {
-                        "l2_confirm_enabled": bool(l2_cfg.get("confirm_enabled", False)),
-                        "l2_min_delta": self._safe_float(l2_cfg.get("min_delta"), 0.0) or 0.0,
-                        "l2_min_imbalance": self._safe_float(l2_cfg.get("min_imbalance"), 0.0) or 0.0,
-                        "l2_min_iceberg_bias": self._safe_float(l2_cfg.get("min_iceberg_bias"), 0.0) or 0.0,
-                        "l2_lookback_bars": max(1, int(self._safe_float(l2_cfg.get("lookback_bars"), 3) or 3)),
-                        "l2_min_participation_ratio": self._safe_float(
-                            l2_cfg.get("min_participation_ratio"), 0.0
-                        ) or 0.0,
-                        "l2_min_directional_consistency": self._safe_float(
-                            l2_cfg.get("min_directional_consistency"), 0.0
-                        ) or 0.0,
-                        "l2_min_signed_aggression": self._safe_float(
-                            l2_cfg.get("min_signed_aggression"), 0.0
-                        ) or 0.0,
-                    }
-                )
-            config_payload["strategy_selection_mode"] = self._normalize_strategy_selection_mode(
-                ticker_cfg.get("strategy_selection_mode")
-            )
-            config_payload["max_active_strategies"] = self._normalize_max_active_strategies(
-                ticker_cfg.get("max_active_strategies"), default=3
+            if not isinstance(ticker_cfg, dict):
+                ticker_cfg = {}
+            config_payload = build_ticker_session_config_payload(
+                self,
+                ticker_cfg=ticker_cfg,
+                regime_detection_minutes=resolved_regime_detection_minutes,
             )
             base_config = self._canonical_trading_config(config_payload)
             self._apply_trading_config_to_session(session, base_config, normalize_momentum=False)
             self._inject_intraday_levels_memory_into_session(session)
 
             # Attach orchestrator and reset session state for new day
-            if self.orchestrator is not None:
-                session.orchestrator = self.orchestrator
-                if cold_start_each_day:
-                    self.orchestrator.full_reset()
-                else:
-                    self.orchestrator.new_session()
+            attach_orchestrator_to_new_session(
+                session,
+                self.orchestrator,
+                cold_start_each_day=cold_start_each_day,
+            )
 
             # Optional config-driven day filter.
             if not self._is_day_allowed(date, ticker):
@@ -690,73 +617,7 @@ class DayTradingManager:
         elif isinstance(trading_config, dict):
             updates.update(trading_config)
 
-        explicit_overrides = {
-            "regime_detection_minutes": regime_detection_minutes,
-            "regime_refresh_bars": regime_refresh_bars,
-            "account_size_usd": account_size_usd,
-            "risk_per_trade_pct": risk_per_trade_pct,
-            "max_position_notional_pct": max_position_notional_pct,
-            "max_fill_participation_rate": max_fill_participation_rate,
-            "min_fill_ratio": min_fill_ratio,
-            "enable_partial_take_profit": enable_partial_take_profit,
-            "partial_take_profit_rr": partial_take_profit_rr,
-            "partial_take_profit_fraction": partial_take_profit_fraction,
-            "trailing_activation_pct": trailing_activation_pct,
-            "break_even_buffer_pct": break_even_buffer_pct,
-            "break_even_min_hold_bars": break_even_min_hold_bars,
-            "break_even_activation_min_mfe_pct": break_even_activation_min_mfe_pct,
-            "break_even_activation_min_r": break_even_activation_min_r,
-            "break_even_activation_min_r_trending_5m": break_even_activation_min_r_trending_5m,
-            "break_even_activation_min_r_choppy_5m": break_even_activation_min_r_choppy_5m,
-            "break_even_activation_use_levels": break_even_activation_use_levels,
-            "break_even_activation_use_l2": break_even_activation_use_l2,
-            "break_even_level_buffer_pct": break_even_level_buffer_pct,
-            "break_even_level_max_distance_pct": break_even_level_max_distance_pct,
-            "break_even_level_min_confluence": break_even_level_min_confluence,
-            "break_even_level_min_tests": break_even_level_min_tests,
-            "break_even_l2_signed_aggression_min": break_even_l2_signed_aggression_min,
-            "break_even_l2_imbalance_min": break_even_l2_imbalance_min,
-            "break_even_l2_book_pressure_min": break_even_l2_book_pressure_min,
-            "break_even_l2_spread_bps_max": break_even_l2_spread_bps_max,
-            "break_even_costs_pct": break_even_costs_pct,
-            "break_even_min_buffer_pct": break_even_min_buffer_pct,
-            "break_even_atr_buffer_k": break_even_atr_buffer_k,
-            "break_even_5m_atr_buffer_k": break_even_5m_atr_buffer_k,
-            "break_even_tick_size": break_even_tick_size,
-            "break_even_min_tick_buffer": break_even_min_tick_buffer,
-            "break_even_anti_spike_bars": break_even_anti_spike_bars,
-            "break_even_anti_spike_hits_required": break_even_anti_spike_hits_required,
-            "break_even_anti_spike_require_close_beyond": (
-                break_even_anti_spike_require_close_beyond
-            ),
-            "break_even_5m_no_go_proximity_pct": break_even_5m_no_go_proximity_pct,
-            "break_even_5m_mfe_atr_factor": break_even_5m_mfe_atr_factor,
-            "break_even_5m_l2_bias_threshold": break_even_5m_l2_bias_threshold,
-            "break_even_5m_l2_bias_tighten_factor": break_even_5m_l2_bias_tighten_factor,
-            "trailing_enabled_in_choppy": trailing_enabled_in_choppy,
-            "time_exit_bars": time_exit_bars,
-            "adverse_flow_exit_enabled": adverse_flow_exit_enabled,
-            "adverse_flow_threshold": adverse_flow_threshold,
-            "adverse_flow_min_hold_bars": adverse_flow_min_hold_bars,
-            "adverse_flow_consistency_threshold": adverse_flow_consistency_threshold,
-            "adverse_book_pressure_threshold": adverse_book_pressure_threshold,
-            "stop_loss_mode": stop_loss_mode,
-            "fixed_stop_loss_pct": fixed_stop_loss_pct,
-            "l2_confirm_enabled": l2_confirm_enabled,
-            "l2_min_delta": l2_min_delta,
-            "l2_min_imbalance": l2_min_imbalance,
-            "l2_min_iceberg_bias": l2_min_iceberg_bias,
-            "l2_lookback_bars": l2_lookback_bars,
-            "l2_min_participation_ratio": l2_min_participation_ratio,
-            "l2_min_directional_consistency": l2_min_directional_consistency,
-            "l2_min_signed_aggression": l2_min_signed_aggression,
-            "cold_start_each_day": cold_start_each_day,
-            "strategy_selection_mode": strategy_selection_mode,
-            "max_active_strategies": max_active_strategies,
-        }
-        for field_name, value in explicit_overrides.items():
-            if value is not None:
-                updates[field_name] = value
+        updates.update(collect_non_none_run_default_overrides(locals()))
 
         if momentum_diversification is not None:
             updates["momentum_diversification"] = self._normalize_momentum_diversification_config(
@@ -816,30 +677,7 @@ class DayTradingManager:
         if not session:
             return {"error": "Session not found"}
 
-        bar = BarData(
-            timestamp=timestamp,
-            open=bar_data.get('open', 0),
-            high=bar_data.get('high', 0),
-            low=bar_data.get('low', 0),
-            close=bar_data.get('close', 0),
-            volume=bar_data.get('volume', 0),
-            vwap=bar_data.get('vwap'),
-            l2_delta=bar_data.get('l2_delta'),
-            l2_buy_volume=bar_data.get('l2_buy_volume'),
-            l2_sell_volume=bar_data.get('l2_sell_volume'),
-            l2_volume=bar_data.get('l2_volume'),
-            l2_imbalance=bar_data.get('l2_imbalance'),
-            l2_bid_depth_total=bar_data.get('l2_bid_depth_total'),
-            l2_ask_depth_total=bar_data.get('l2_ask_depth_total'),
-            l2_book_pressure=bar_data.get('l2_book_pressure'),
-            l2_book_pressure_change=bar_data.get('l2_book_pressure_change'),
-            l2_iceberg_buy_count=bar_data.get('l2_iceberg_buy_count'),
-            l2_iceberg_sell_count=bar_data.get('l2_iceberg_sell_count'),
-            l2_iceberg_bias=bar_data.get('l2_iceberg_bias'),
-            l2_quality_flags=bar_data.get('l2_quality_flags'),
-            l2_quality=bar_data.get('l2_quality'),
-            intrabar_quotes_1s=bar_data.get('intrabar_quotes_1s'),
-        )
+        bar = build_intrabar_slice_bar_data(timestamp=timestamp, bar_data=bar_data)
 
         return runtime_evaluate_intrabar_slice(
             self=self,

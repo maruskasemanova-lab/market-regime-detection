@@ -514,6 +514,7 @@ class TradeExecutionEngine:
                     _mfe = max(0.0, pos.entry_price - float(getattr(pos, "lowest_price", pos.entry_price) or pos.entry_price))
                 if (_mfe / _risk) < _pp_min_r:
                     _should_be = False
+        print(f"DEBUG_MFE: _pp_min_r={_pp_min_r}, _mfe={_mfe if '_mfe' in locals() else -1}, _risk={_risk if '_risk' in locals() else -1}, entry={pos.entry_price}, sl={getattr(pos, 'stop_loss', 0)}")
         if _should_be:
             self.exit_engine.force_move_to_break_even(
                 session=session,

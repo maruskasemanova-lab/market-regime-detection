@@ -21,10 +21,10 @@ class EvidenceScalpStrategy(BaseStrategy):
     def __init__(
         self,
         # ── 5s Price Action ──
-        min_5s_move_pct: float = 0.02,
-        min_5s_push_ratio: float = 0.60,
+        min_5s_move_pct: float = 0.04,
+        min_5s_push_ratio: float = 0.75,
         # ── Order Flow (L2) ──
-        min_l2_aggression: float = 0.04,
+        min_l2_aggression: float = 0.08,
         min_book_pressure: float = 0.08,
         # ── Options Flow (TCBBO) ──
         min_tcbbo_premium: float = 25000.0,

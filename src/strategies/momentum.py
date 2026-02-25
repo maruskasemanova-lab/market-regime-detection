@@ -23,10 +23,10 @@ class MomentumStrategy(BaseStrategy):
     
     def __init__(
         self,
-        consolidation_bars: int = 10,         # 10 minute consolidation (standard flag)
+        consolidation_bars: int = 15,         # 15 minute consolidation (better base)
         volume_threshold: float = 1.5,        # Moderate volume confirmation
         volume_lookback: int = 20,
-        consolidation_range_pct: float = 1.5, # % of price — higher for volatile stocks like MU
+        consolidation_range_pct: float = 0.5, # % of price — 0.5% for tight flag
         breakout_pct: float = 0.15,           # Breakout buffer
         volume_stop_pct: float = 1.5,         # Wider stop for volatile stocks
         rr_ratio: float = 2.5,                # Good R:R
@@ -37,6 +37,7 @@ class MomentumStrategy(BaseStrategy):
             name="Momentum",
             regimes=[Regime.TRENDING]
         )
+        self._uses_l2_internally = True
         self.consolidation_bars = consolidation_bars
         self.volume_threshold = volume_threshold
         self.volume_lookback = volume_lookback
@@ -116,14 +117,22 @@ class MomentumStrategy(BaseStrategy):
         # Filter: Strong Momentum using ADX (lowered from 35 for more trade opportunities)
         if adx_val < 25:  # ADX > 25 indicates trending conditions
             return None
+            
+        # Get L2 Flow
+        flow = indicators.get("order_flow") or {}
+        signed_aggr = float(flow.get("signed_aggression", 0.0) or 0.0)
         
         signal = None
-        confidence = 50.0
+        confidence = 30.0  # Lowered from 50 to enforce requiring strong volume/consolidation
         reasoning_parts = []
         
         # LONG BREAKOUT
         breakout_buffer = current_price * (self.volume_adjusted_pct(self.breakout_pct, volume_ratio) / 100)
         if current_price > consol_high + breakout_buffer:
+            # Order Flow Filter
+            if signed_aggr < 0.02:
+                return None
+                
             # Trend Filter: Price must be aligned with SMA (Trend)
             sma_val = indicators.get('sma')[-1] if indicators.get('sma') else None
             if sma_val and current_price < sma_val:
@@ -192,6 +201,10 @@ class MomentumStrategy(BaseStrategy):
         
         # SHORT BREAKDOWN
         elif current_price < consol_low - breakout_buffer:
+            # Order Flow Filter
+            if signed_aggr > -0.02:
+                return None
+                
             # Trend Filter: Price must be aligned with SMA (Trend)
             sma_val = indicators.get('sma')[-1] if indicators.get('sma') else None
             if sma_val and current_price > sma_val:

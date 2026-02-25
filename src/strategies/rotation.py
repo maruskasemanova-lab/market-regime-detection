@@ -24,7 +24,8 @@ class RotationStrategy(BaseStrategy):
     def __init__(
         self,
         lookback_period: int = 10,            # Lowered from 20 for faster signal
-        rotation_threshold: float = 0.5,      # Lowered from 2.0% (too high for 20 mins)
+        rotation_threshold: float = 0.35,     # Lowered to catch early rotation
+        max_performance: float = 0.8,         # Prevent buying exhaustion tops
         volume_lookback: int = 10,
         volume_increase_ratio: float = 1.05,
         volume_stop_pct: float = 0.9,
@@ -35,8 +36,10 @@ class RotationStrategy(BaseStrategy):
             name="Rotation",
             regimes=[Regime.MIXED, Regime.CHOPPY]
         )
+        self._uses_l2_internally = True
         self.lookback_period = lookback_period
         self.rotation_threshold = rotation_threshold
+        self.max_performance = max_performance
         self.volume_lookback = volume_lookback
         self.volume_increase_ratio = volume_increase_ratio
         self.volume_stop_pct = volume_stop_pct
@@ -61,11 +64,11 @@ class RotationStrategy(BaseStrategy):
         if len(self.get_open_positions()) > 0:
             return None
         
-        # Get indicators
         vwap = indicators.get('vwap')
         rsi = indicators.get('rsi')
         sma = indicators.get('sma')
         ema = indicators.get('ema')
+        adx = indicators.get('adx')
         
         if vwap is None:
             return None
@@ -74,6 +77,10 @@ class RotationStrategy(BaseStrategy):
         rsi_val = rsi[-1] if isinstance(rsi, list) else (rsi or 50)
         sma_val = sma[-1] if isinstance(sma, list) else (sma or current_price)
         ema_val = ema[-1] if isinstance(ema, list) else (ema or current_price)
+        adx_val = adx[-1] if isinstance(adx, list) else (adx or 20)
+        
+        flow = indicators.get("order_flow") or {}
+        signed_aggr = float(flow.get("signed_aggression", 0.0) or 0.0)
         
         closes = ohlcv.get('close', [])
         volumes = ohlcv.get('volume', [])
@@ -105,14 +112,21 @@ class RotationStrategy(BaseStrategy):
         volume_increasing = avg_volume and recent_volume > avg_volume * self.volume_increase_ratio
         
         signal = None
-        confidence = 50.0
+        confidence = 30.0  # Lowered base to require volume and trend confirmation
         reasoning_parts = []
         
         # ROTATION TO LONG
         # Conditions: Price recovering toward VWAP from below, MAs turning up
-        if (performance > self.rotation_threshold and 
-            -1 <= vwap_distance <= 1 and 
+        if (self.rotation_threshold < performance < self.max_performance and 
+            -0.2 <= vwap_distance <= 0.4 and 
             ma_bullish):
+            
+            # Trend Filter: Do not rotate LONG if market is strongly trending DOWN
+            if adx_val > 25 and not ma_bullish:
+                return None
+            # Order Flow Filter: Require buying pressure
+            if signed_aggr < 0.01:
+                return None
             
             reasoning_parts.append(f"Positive rotation ({performance:.1f}% in {self.lookback_period} bars)")
             confidence += 15
@@ -160,9 +174,16 @@ class RotationStrategy(BaseStrategy):
         
         # ROTATION TO SHORT
         # Conditions: Price weakening from above VWAP, MAs turning down
-        elif (performance < -self.rotation_threshold and 
-              -1 <= vwap_distance <= 1 and 
+        elif (-self.max_performance < performance < -self.rotation_threshold and 
+              -0.4 <= vwap_distance <= 0.2 and 
               ma_bearish):
+            
+            # Trend Filter: Do not rotate SHORT if market is strongly trending UP
+            if adx_val > 25 and not ma_bearish:
+                return None
+            # Order Flow Filter: Require selling pressure
+            if signed_aggr > -0.01:
+                return None
             
             reasoning_parts.append(f"Negative rotation ({performance:.1f}% in {self.lookback_period} bars)")
             confidence += 15
@@ -219,6 +240,7 @@ class RotationStrategy(BaseStrategy):
         base.update({
             'lookback_period': self.lookback_period,
             'rotation_threshold': self.rotation_threshold,
+            'max_performance': self.max_performance,
             'volume_lookback': self.volume_lookback,
             'volume_increase_ratio': self.volume_increase_ratio,
             'volume_stop_pct': self.volume_stop_pct,
