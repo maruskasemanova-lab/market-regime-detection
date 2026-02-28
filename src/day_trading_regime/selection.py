@@ -284,6 +284,7 @@ def regime_select_strategies(self, session: TradingSession) -> List[str]:
         candidates.extend(self.default_preference.get(regime, []))
 
     flow_metrics = self._calculate_order_flow_metrics(session.bars, lookback=min(20, len(session.bars)))
+    print(f"DEBUG: flow_metrics: {flow_metrics.get('has_l2_coverage')}, bars: {len(session.bars)}")
     if not strict_preferences:
         # If L2 coverage is present on current bars, bias toward flow strategies.
         # Otherwise, add OHLCV-based strategies as fallbacks.
@@ -321,6 +322,7 @@ def regime_select_strategies(self, session: TradingSession) -> List[str]:
 
     filtered: List[str] = []
     seen = set()
+    print(f"DEBUG: regime_select_strategies candidates: {candidates}")
     for raw_name in candidates:
         name = self._canonical_strategy_key(raw_name)
         if not name or name in seen:

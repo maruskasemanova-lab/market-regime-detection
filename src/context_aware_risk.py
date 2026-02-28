@@ -51,6 +51,7 @@ class ContextRiskConfig:
     enabled: bool = False
     sl_buffer_pct: float = 0.03
     min_sl_pct: float = 0.30
+    pullback_min_sl_pct: float = 0.50
     min_room_pct: float = 0.15
     min_effective_rr: float = 0.8
     trailing_tighten_zone: float = 0.2
@@ -74,6 +75,12 @@ class ContextRiskConfig:
             return defaults["min_effective_rr"]
         return self.min_effective_rr
 
+    def effective_min_sl_pct(self, strategy_key: str = "") -> float:
+        key = str(strategy_key or "").strip().lower()
+        if key == "pullback":
+            return max(self.min_sl_pct, self.pullback_min_sl_pct)
+        return self.min_sl_pct
+
     @classmethod
     def from_config_obj(cls, cfg: Any) -> "ContextRiskConfig":
         return cls(
@@ -85,6 +92,10 @@ class ContextRiskConfig:
             min_sl_pct=max(
                 0.0,
                 _to_float(getattr(cfg, "context_risk_min_sl_pct", 0.30), 0.30),
+            ),
+            pullback_min_sl_pct=max(
+                0.0,
+                _to_float(getattr(cfg, "pullback_context_min_sl_pct", 0.50), 0.50),
             ),
             min_room_pct=max(
                 0.0,
@@ -298,25 +309,26 @@ def adjust_entry_risk(
                 sl_reason = f"{sl_reason}|sweep_atr_buffer:{atr_buffer_abs:.4f}"
 
     # Never allow a context-adjusted SL that is closer than configured minimum room.
-    min_sl_abs = entry_price * (config.min_sl_pct / 100.0)
+    effective_min_sl_pct = config.effective_min_sl_pct(strategy_key)
+    min_sl_abs = entry_price * (effective_min_sl_pct / 100.0)
     if min_sl_abs > 0.0:
         if is_long:
             min_stop = max(0.0, entry_price - min_sl_abs)
             if adjusted_sl <= 0.0 or adjusted_sl > min_stop:
                 adjusted_sl = min_stop
                 sl_reason = (
-                    f"{sl_reason}|min_sl_floor:{config.min_sl_pct:.4f}"
+                    f"{sl_reason}|min_sl_floor:{effective_min_sl_pct:.4f}"
                     if sl_reason
-                    else f"min_sl_floor:{config.min_sl_pct:.4f}"
+                    else f"min_sl_floor:{effective_min_sl_pct:.4f}"
                 )
         else:
             min_stop = entry_price + min_sl_abs
             if adjusted_sl <= 0.0 or adjusted_sl < min_stop:
                 adjusted_sl = min_stop
                 sl_reason = (
-                    f"{sl_reason}|min_sl_floor:{config.min_sl_pct:.4f}"
+                    f"{sl_reason}|min_sl_floor:{effective_min_sl_pct:.4f}"
                     if sl_reason
-                    else f"min_sl_floor:{config.min_sl_pct:.4f}"
+                    else f"min_sl_floor:{effective_min_sl_pct:.4f}"
                 )
 
     # Take-profit anchor
@@ -372,7 +384,7 @@ def adjust_entry_risk(
         "risk_pct": round(risk_pct, 6),
         "room_pct": round(room_pct, 6),
         "configured_min_room_pct": round(eff_min_room, 6),
-        "configured_min_sl_pct": round(config.min_sl_pct, 6),
+        "configured_min_sl_pct": round(effective_min_sl_pct, 6),
         "configured_min_effective_rr": round(eff_min_rr, 6),
         "strategy_key": strategy_key or None,
     }
@@ -447,7 +459,7 @@ def adjust_entry_risk(
         "effective_rr": round(effective_rr, 6),
         "risk_pct": round(risk_pct, 6),
         "room_pct": round(room_pct, 6),
-        "configured_min_sl_pct": round(config.min_sl_pct, 6),
+        "configured_min_sl_pct": round(effective_min_sl_pct, 6),
     }
 
 

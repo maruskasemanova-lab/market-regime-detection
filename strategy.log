@@ -1,7 +1,1 @@
-INFO:     Will watch for changes in these directories: ['/Users/hotovo/.gemini/antigravity/scratch/market_regime_detection']
-INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
-INFO:     Started reloader process [57761] using WatchFiles
-INFO:     Started server process [57837]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     127.0.0.1:62235 - "GET / HTTP/1.1" 200 OK
+/Users/hotovo/.pyenv/versions/3.10.11/bin/python3: No module named src.main

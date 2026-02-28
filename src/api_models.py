@@ -64,6 +64,17 @@ class BarInput(BaseModel):
     # Each frame should include:
     #   s: second-in-minute [0..59], bid: top bid px, ask: top ask px
     intrabar_quotes_1s: Optional[List[Dict[str, float]]] = None
+    # TCBBO options flow fields
+    tcbbo_net_premium: Optional[float] = None
+    tcbbo_cumulative_net_premium: Optional[float] = None
+    tcbbo_call_buy_premium: Optional[float] = None
+    tcbbo_put_buy_premium: Optional[float] = None
+    tcbbo_call_sell_premium: Optional[float] = None
+    tcbbo_put_sell_premium: Optional[float] = None
+    tcbbo_sweep_count: Optional[int] = None
+    tcbbo_sweep_premium: Optional[float] = None
+    tcbbo_trade_count: Optional[int] = None
+    tcbbo_has_data: Optional[bool] = None
     # Cross-asset reference bar (optional, e.g. QQQ)
     ref_ticker: Optional[str] = None
     ref_open: Optional[float] = None
@@ -228,6 +239,18 @@ class TradingConfig(BaseModel):
     context_risk_level_trail_enabled: bool = True
     context_risk_max_anchor_search_pct: float = 1.5
     context_risk_min_level_tests_for_sl: int = 1
+    pullback_context_min_sl_pct: float = 0.50
+    pullback_time_exit_bars: int = 7
+    pullback_morning_window_enabled: bool = True
+    pullback_entry_start_time: str = "10:00"
+    pullback_entry_end_time: str = "11:30"
+    pullback_require_poc_on_trade_side: bool = True
+    pullback_block_choppy_macro: bool = True
+    pullback_blocked_micro_regimes: List[str] = ["CHOPPY", "TRANSITION"]
+    pullback_min_price_trend_efficiency: float = 0.15
+    pullback_break_even_proof_required: bool = False
+    pullback_break_even_activation_min_r: float = 0.40
+    pullback_break_even_l2_book_pressure_min: float = 0.03
     golden_setups_enabled: bool = False
     golden_setups_max_entries_per_day: int = 3
     golden_setups_cooldown_bars: int = 5

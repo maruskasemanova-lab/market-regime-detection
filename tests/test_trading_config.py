@@ -131,6 +131,11 @@ def test_round_trip_dict_conversion_is_stable() -> None:
             "intraday_levels_micro_confirmation_intrabar_min_push_ratio": 0.2,
             "intraday_levels_micro_confirmation_intrabar_max_spread_bps": 8.0,
             "intrabar_eval_step_seconds": 7,
+            "pullback_time_exit_bars": 8,
+            "pullback_entry_start_time": "09:55",
+            "pullback_entry_end_time": "11:25",
+            "pullback_blocked_micro_regimes": ["CHOPPY", "TRANSITION"],
+            "pullback_break_even_activation_min_r": 0.45,
         }
     )
 

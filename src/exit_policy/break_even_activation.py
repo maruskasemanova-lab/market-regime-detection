@@ -38,6 +38,12 @@ def evaluate_break_even_activation_context(
         min_hold_for_break_even = max(1, int(weak_l2_override["break_even_min_hold_bars"]))
 
     side = str(getattr(pos, "side", "long")).strip().lower()
+    strategy_key = str(getattr(pos, "strategy_name", "") or "").strip().lower()
+    cfg_obj = getattr(session, "config", None)
+    pullback_strategy = strategy_key == "pullback"
+    pullback_proof_required = bool(
+        getattr(cfg_obj, "pullback_break_even_proof_required", False)
+    )
     entry_price = _to_float(getattr(pos, "entry_price", None), 0.0)
     last_break_even_snapshot = (
         dict(getattr(pos, "break_even_last_update", {}))
@@ -98,6 +104,9 @@ def evaluate_break_even_activation_context(
 
     use_levels = cfg_bool(session, "break_even_activation_use_levels", True)
     use_l2 = cfg_bool(session, "break_even_activation_use_l2", True)
+    if pullback_strategy and not pullback_proof_required:
+        use_levels = False
+        use_l2 = False
     proof_required = bool(use_levels or use_l2)
     proof_candidates: List[bool] = []
     if use_levels:
@@ -126,6 +135,14 @@ def evaluate_break_even_activation_context(
     required_mfe_pct = max(base_activation_mfe_pct, atr_activation_mfe_pct)
 
     base_r = max(0.0, cfg_float(session, "break_even_activation_min_r", 0.60))
+    if pullback_strategy:
+        try:
+            pullback_base_r = float(
+                getattr(cfg_obj, "pullback_break_even_activation_min_r", 0.40) or 0.40
+            )
+        except (TypeError, ValueError):
+            pullback_base_r = 0.40
+        base_r = max(0.0, pullback_base_r)
     if regime_5m == "trending":
         required_r = max(base_r, cfg_float(session, "break_even_activation_min_r_trending_5m", 0.90))
     elif regime_5m == "choppy":
@@ -158,6 +175,7 @@ def evaluate_break_even_activation_context(
     trailing_stop_active = bool(getattr(pos, "trailing_stop_active", False))
     partial_tp_filled = bool(getattr(pos, "partial_tp_filled", False))
     formula_context = {
+        "strategy": strategy_key,
         "side": side,
         "bars_held_count": int(bars_held_count),
         "min_hold_for_break_even": int(min_hold_for_break_even),
@@ -201,6 +219,8 @@ def evaluate_break_even_activation_context(
         "break_even_active": bool(break_even_active),
         "trailing_stop_active": bool(trailing_stop_active),
         "partial_tp_filled": bool(partial_tp_filled),
+        "pullback_strategy": bool(pullback_strategy),
+        "pullback_proof_required": bool(pullback_proof_required),
     }
     movement_formula = evaluate_runtime_exit_formula(
         session=session,
@@ -266,6 +286,9 @@ def evaluate_break_even_activation_context(
         "activation_formula": activation_formula,
         "movement_passed": movement_passed,
         "side": side,
+        "strategy": strategy_key,
+        "pullback_strategy": pullback_strategy,
+        "pullback_proof_required": pullback_proof_required,
     }
 
 

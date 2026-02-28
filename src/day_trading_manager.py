@@ -10,12 +10,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 from .strategies.base_strategy import BaseStrategy, Signal, Position, Regime
-from .strategy_factory import build_strategy_registry
-from .trading_orchestrator import TradingOrchestrator
-from .exit_policy_engine import ExitPolicyEngine
 from .day_trading_config_service import DayTradingConfigService
 from .day_trading_evidence_service import DayTradingEvidenceService
-from .day_trading_strategy_evaluator import StrategyEvaluatorEngine
 from .day_trading_models import (
     BarData,
     DayTrade,
@@ -51,8 +47,6 @@ from .day_trading_regime_impl import (
     regime_select_momentum_sleeve,
     regime_select_strategies,
 )
-from .day_trading_gate_impl import GateEvaluationEngine
-from .day_trading_trade_impl import TradeExecutionEngine
 from .strategy_formula_engine import evaluate_strategy_formula
 from .strategy_formula_engine import StrategyFormulaEvaluationError
 from .intraday_levels import (
@@ -61,7 +55,6 @@ from .intraday_levels import (
     intraday_levels_indicator_payload,
     update_intraday_levels_state,
 )
-from .golden_setup_detector import GoldenSetupDetector
 from .day_trading_intraday_memory import IntradayMemoryService
 from .day_trading_manager_helpers.aos_loader import (
     load_aos_config as _load_aos_config_impl,
@@ -69,21 +62,30 @@ from .day_trading_manager_helpers.aos_loader import (
 from .day_trading_manager_helpers.intrabar_bar_factory import (
     build_intrabar_slice_bar_data,
 )
-from .day_trading_manager_helpers.preferences import (
-    bootstrap_ticker_preferences,
-    default_micro_regime_preferences,
-    default_regime_preferences,
-    default_ticker_preferences,
-)
-from .day_trading_manager_helpers.session_config import (
-    build_ticker_session_config_payload,
+from .day_trading_manager_helpers.service_wiring import (
+    wire_manager_services,
 )
 from .day_trading_manager_helpers.session_lifecycle import (
-    attach_orchestrator_to_new_session,
     recover_existing_session_orchestrator,
 )
-from .day_trading_manager_helpers.run_defaults import (
-    collect_non_none_run_default_overrides,
+from .day_trading_manager_helpers.session_creation import (
+    create_session_with_defaults,
+)
+from .day_trading_manager_helpers.initialization import (
+    apply_core_runtime_defaults,
+)
+from .day_trading_manager_helpers.run_defaults_apply import (
+    apply_run_defaults,
+)
+from .day_trading_manager_helpers.session_state import (
+    build_session_summary,
+    clear_session_state,
+    clear_sessions_for_run_state,
+    close_session_and_collect_summary,
+    reset_backtest_state as reset_backtest_state_impl,
+)
+from .day_trading_manager_helpers.strategy_edge import (
+    compute_strategy_edge_adjustment,
 )
 
 
@@ -175,147 +177,17 @@ class DayTradingManager:
         portfolio_drawdown_halt_pct: float = 5.0,
         headwind_activation_score: float = 0.5,
     ):
-        self.sessions: Dict[str, TradingSession] = {}  # session_key -> TradingSession
-        self.regime_detection_minutes = regime_detection_minutes
-        self.trading_costs = trading_costs or TradingCosts()
-        self.max_daily_loss = max_daily_loss  # Stop trading if loss exceeds this amount
-        self.max_trades_per_day = max_trades_per_day  # Limit trades to reduce fees
-        self.trade_cooldown_bars = trade_cooldown_bars  # Cooldown between trades
-        self.pending_signal_ttl_bars = max(1, int(pending_signal_ttl_bars))
-        self.consecutive_loss_limit = max(1, int(consecutive_loss_limit))
-        self.consecutive_loss_cooldown_bars = max(0, int(consecutive_loss_cooldown_bars))
-        self.regime_refresh_bars = max(1, int(regime_refresh_bars))
-        self.risk_per_trade_pct = max(0.1, float(risk_per_trade_pct))
-        self.max_position_notional_pct = max(1.0, float(max_position_notional_pct))
-        self.max_fill_participation_rate = 0.20
-        self.min_fill_ratio = 0.35
-        self.time_exit_bars = max(1, int(time_exit_bars))
-        self.enable_partial_take_profit = bool(enable_partial_take_profit)
-        self.partial_take_profit_rr = max(0.25, float(partial_take_profit_rr))
-        self.partial_take_profit_fraction = min(0.95, max(0.05, float(partial_take_profit_fraction)))
-        self.trailing_activation_pct = max(0.0, float(trailing_activation_pct))
-        self.break_even_buffer_pct = max(0.0, float(break_even_buffer_pct))
-        self.break_even_min_hold_bars = max(1, int(break_even_min_hold_bars))
-        self.break_even_activation_min_mfe_pct = max(0.0, float(break_even_activation_min_mfe_pct))
-        self.break_even_activation_min_r = max(0.0, float(break_even_activation_min_r))
-        self.break_even_activation_min_r_trending_5m = max(
-            0.0, float(break_even_activation_min_r_trending_5m)
-        )
-        self.break_even_activation_min_r_choppy_5m = max(
-            0.0, float(break_even_activation_min_r_choppy_5m)
-        )
-        self.break_even_activation_use_levels = bool(break_even_activation_use_levels)
-        self.break_even_activation_use_l2 = bool(break_even_activation_use_l2)
-        self.break_even_level_buffer_pct = max(0.0, float(break_even_level_buffer_pct))
-        self.break_even_level_max_distance_pct = max(0.01, float(break_even_level_max_distance_pct))
-        self.break_even_level_min_confluence = max(0, int(break_even_level_min_confluence))
-        self.break_even_level_min_tests = max(0, int(break_even_level_min_tests))
-        self.break_even_l2_signed_aggression_min = max(
-            0.0, float(break_even_l2_signed_aggression_min)
-        )
-        self.break_even_l2_imbalance_min = max(0.0, float(break_even_l2_imbalance_min))
-        self.break_even_l2_book_pressure_min = max(
-            0.0, float(break_even_l2_book_pressure_min)
-        )
-        self.break_even_l2_spread_bps_max = max(0.0, float(break_even_l2_spread_bps_max))
-        self.break_even_costs_pct = max(0.0, float(break_even_costs_pct))
-        self.break_even_min_buffer_pct = max(0.0, float(break_even_min_buffer_pct))
-        self.break_even_atr_buffer_k = max(0.0, float(break_even_atr_buffer_k))
-        self.break_even_5m_atr_buffer_k = max(0.0, float(break_even_5m_atr_buffer_k))
-        self.break_even_tick_size = max(0.0, float(break_even_tick_size))
-        self.break_even_min_tick_buffer = max(0, int(break_even_min_tick_buffer))
-        self.break_even_anti_spike_bars = max(0, int(break_even_anti_spike_bars))
-        self.break_even_anti_spike_hits_required = max(1, int(break_even_anti_spike_hits_required))
-        self.break_even_anti_spike_require_close_beyond = bool(
-            break_even_anti_spike_require_close_beyond
-        )
-        self.break_even_5m_no_go_proximity_pct = max(
-            0.0, float(break_even_5m_no_go_proximity_pct)
-        )
-        self.break_even_5m_mfe_atr_factor = max(0.0, float(break_even_5m_mfe_atr_factor))
-        self.break_even_5m_l2_bias_threshold = max(
-            0.0, float(break_even_5m_l2_bias_threshold)
-        )
-        self.break_even_5m_l2_bias_tighten_factor = max(
-            0.1, min(2.0, float(break_even_5m_l2_bias_tighten_factor))
-        )
-        self.trailing_enabled_in_choppy = bool(trailing_enabled_in_choppy)
-        self.adverse_flow_exit_enabled = bool(adverse_flow_exit_enabled)
-        self.adverse_flow_exit_threshold = max(0.02, float(adverse_flow_exit_threshold))
-        self.adverse_flow_min_hold_bars = max(1, int(adverse_flow_min_hold_bars))
-        self.adverse_flow_consistency_threshold = max(0.02, float(adverse_flow_consistency_threshold))
-        self.adverse_book_pressure_threshold = max(0.02, float(adverse_book_pressure_threshold))
-        self.portfolio_drawdown_halt_pct = max(0.0, float(portfolio_drawdown_halt_pct))
-        self.headwind_activation_score = min(0.95, max(0.0, float(headwind_activation_score)))
-        self.market_tz = ZoneInfo("America/New_York")
-        self.run_defaults: Dict[tuple, Dict[str, Any]] = {}
-        self.run_equity_state: Dict[str, Dict[str, Any]] = {}
-        self.intraday_memory = IntradayMemoryService()
-        
-        self.last_trade_bar_index = {}  # Track last trade bar per session
-
-        # Evidence-based orchestrator (new architecture)
-        self.orchestrator = TradingOrchestrator()
-
-        # Exit policy engine (extracted from this class)
-        self.exit_engine = ExitPolicyEngine()
-
-        # Pre-configured strategies
-        self.strategies = build_strategy_registry()
-
-        # Helper services: config normalization + evidence parsing.
-        # Bootstrap preferences are used before full defaults/config overrides load.
-        self.ticker_preferences = bootstrap_ticker_preferences()
-
-        # Initialize ticker_params dictionary
-        self.ticker_params: Dict[str, Dict[str, Any]] = {}
-        target_file = "/Users/hotovo/.gemini/antigravity/scratch/backtest-runner/aos_optimization/aos_config.json"
-        
-        # Load local settings mapping (if provided)
-        try:
-            self._load_aos_config(target_file)
-        except Exception as e:
-            logger.warning(f"Could not load AOS config from {target_file}: {e}")
-
-        self.config_service = DayTradingConfigService(self)
-        self.evidence_service = DayTradingEvidenceService(
-            canonical_strategy_key=self._canonical_strategy_key,
-            safe_float=self._safe_float,
-        )
-        self.trade_engine = TradeExecutionEngine(
-            config_service=self.config_service,
-            evidence_service=self.evidence_service,
-            exit_engine=self.exit_engine,
-            ticker_params=self.ticker_params,
-            get_session_key=self._get_session_key,
+        apply_core_runtime_defaults(
             manager=self,
+            init_values=locals(),
+            trading_costs_factory=TradingCosts,
+            intraday_memory_factory=IntradayMemoryService,
         )
-        self.strategy_evaluator = StrategyEvaluatorEngine(
-            evidence_service=self.evidence_service,
-        )
-        self.gate_engine = GateEvaluationEngine(
-            exit_engine=self.exit_engine,
-            config_service=self.config_service,
-            evidence_service=self.evidence_service,
-            default_momentum_strategies=self.DEFAULT_MOMENTUM_STRATEGIES,
+        wire_manager_services(
             manager=self,
-            ticker_params=self.ticker_params,
+            stop_loss_mode=stop_loss_mode,
+            fixed_stop_loss_pct=fixed_stop_loss_pct,
         )
-        self.golden_setup_detector = GoldenSetupDetector()
-        self.stop_loss_mode = self._normalize_stop_loss_mode(stop_loss_mode)
-        self.fixed_stop_loss_pct = max(0.0, float(fixed_stop_loss_pct))
-        
-        # Strategy selection by regime
-        # Default Preferences - including new volume-focused strategies
-        self.default_preference = default_regime_preferences()
-        self.micro_regime_preference = default_micro_regime_preferences()
-        self.ticker_preferences = default_ticker_preferences()
-        
-        # AOS ticker-specific parameters (will be loaded from config)
-        self.ticker_params = {}
-        
-        # Try to load AOS config
-        self._load_aos_config()
     
     def _load_aos_config(self, config_path: str = None):
         return _load_aos_config_impl(self=self, config_path=config_path)
@@ -499,45 +371,15 @@ class DayTradingManager:
             )
             return session
 
-        if key not in self.sessions:
-            # Refresh AOS config for newly created sessions so dashboard updates
-            # are picked up.
-            self._load_aos_config()
-            # Defensive reset: if a previous run used the same session key,
-            # stale cooldown state must not leak into the new replay.
-            self.last_trade_bar_index.pop(key, None)
-
-            self.sessions[key] = TradingSession(
-                run_id=run_id,
-                ticker=ticker,
-                date=date,
-                regime_detection_minutes=resolved_regime_detection_minutes,
-            )
-            session = self.sessions[key]
-            ticker_cfg = self.ticker_params.get(str(ticker).upper(), {})
-            if not isinstance(ticker_cfg, dict):
-                ticker_cfg = {}
-            config_payload = build_ticker_session_config_payload(
-                self,
-                ticker_cfg=ticker_cfg,
-                regime_detection_minutes=resolved_regime_detection_minutes,
-            )
-            base_config = self._canonical_trading_config(config_payload)
-            self._apply_trading_config_to_session(session, base_config, normalize_momentum=False)
-            self._inject_intraday_levels_memory_into_session(session)
-
-            # Attach orchestrator and reset session state for new day
-            attach_orchestrator_to_new_session(
-                session,
-                self.orchestrator,
-                cold_start_each_day=cold_start_each_day,
-            )
-
-            # Optional config-driven day filter.
-            if not self._is_day_allowed(date, ticker):
-                session.phase = SessionPhase.CLOSED
-
-        return self.sessions[key]
+        return create_session_with_defaults(
+            manager=self,
+            key=key,
+            run_id=run_id,
+            ticker=ticker,
+            date=date,
+            regime_detection_minutes=resolved_regime_detection_minutes,
+            cold_start_each_day=cold_start_each_day,
+        )
 
     def set_run_defaults(
         self,
@@ -608,34 +450,13 @@ class DayTradingManager:
     ) -> None:
         """Set default parameters for all sessions in a run."""
         key = (run_id, ticker)
-        defaults = self.run_defaults.get(key, {})
-        if not isinstance(defaults, dict):
-            defaults = {}
-
-        updates: Dict[str, Any] = {}
-        if isinstance(trading_config, TradingConfig):
-            updates.update(trading_config.to_session_params())
-        elif isinstance(trading_config, dict):
-            updates.update(trading_config)
-
-        updates.update(collect_non_none_run_default_overrides(locals()))
-
-        if momentum_diversification is not None:
-            updates["momentum_diversification"] = self._normalize_momentum_diversification_config(
-                momentum_diversification
-            )
-        elif "momentum_diversification" in updates and isinstance(updates["momentum_diversification"], dict):
-            updates["momentum_diversification"] = self._normalize_momentum_diversification_config(
-                updates["momentum_diversification"]
-            )
-
-        if not updates:
-            return
-
-        validated = self._canonical_trading_config({**defaults, **updates}).to_session_params()
-        for field_name in updates:
-            defaults[field_name] = validated[field_name]
-        self.run_defaults[key] = defaults
+        apply_run_defaults(
+            manager=self,
+            key=key,
+            local_values=locals(),
+            momentum_diversification=momentum_diversification,
+            trading_config=trading_config,
+        )
     
     def get_session(self, run_id: str, ticker: str, date: str) -> Optional[TradingSession]:
         """Get existing session."""
@@ -834,33 +655,11 @@ class DayTradingManager:
         This prevents single-trade statistical noise from suppressing
         valid follow-up signals.
         """
-        relevant = [
-            t for t in session.trades
-            if self._canonical_strategy_key(getattr(t, "strategy", "")) == strategy_key
-        ]
-        if not relevant:
-            return 0.0
-
-        n = len(relevant)
-        # Warmup: no edge adjustment until we have enough trades for
-        # statistical relevance. Ramp from 0% at trade 2 to 100% at trade 5+.
-        edge_warmup_trades = 3
-        if n < edge_warmup_trades:
-            return 0.0
-        ramp = min(1.0, (n - edge_warmup_trades + 1) / 3.0)
-
-        wins = [t for t in relevant if t.pnl_pct > 0]
-        losses = [t for t in relevant if t.pnl_pct <= 0]
-        # Smoothed win rate to avoid unstable first trades.
-        win_rate = (len(wins) + 1.0) / (n + 2.0)
-        avg_win = (sum(t.pnl_pct for t in wins) / len(wins)) if wins else 0.0
-        avg_loss = (abs(sum(t.pnl_pct for t in losses)) / len(losses)) if losses else 0.0
-        expectancy = (win_rate * avg_win) - ((1.0 - win_rate) * avg_loss)
-        pf = (sum(t.pnl_pct for t in wins) / abs(sum(t.pnl_pct for t in losses))) if losses else (2.0 if wins else 0.0)
-
-        edge = ((win_rate - 0.5) * 36.0) + ((pf - 1.0) * 6.0) + (expectancy * 4.0)
-        edge = max(-12.0, min(12.0, edge))
-        return edge * ramp
+        return compute_strategy_edge_adjustment(
+            manager=self,
+            session=session,
+            strategy_key=strategy_key,
+        )
     
     def _process_trading_bar(
         self, 
@@ -1187,46 +986,7 @@ class DayTradingManager:
 
     def _get_session_summary(self, session: TradingSession) -> Dict[str, Any]:
         """Get summary of trading session."""
-        trades = session.trades
-        
-        if not trades:
-            return {
-                'ticker': session.ticker,
-                'date': session.date,
-                'regime': session.detected_regime.value if session.detected_regime else None,
-                'micro_regime': session.micro_regime,
-                'strategy': session.selected_strategy,
-                'selection_warnings': list(session.selection_warnings),
-                'total_trades': 0,
-                'total_pnl_pct': 0,
-                'success': False
-            }
-        
-        winning = [t for t in trades if t.pnl_pct > 0]
-        losing = [t for t in trades if t.pnl_pct <= 0]
-        
-        return {
-            'ticker': session.ticker,
-            'date': session.date,
-            'run_id': session.run_id,
-            'regime': session.detected_regime.value if session.detected_regime else None,
-            'micro_regime': session.micro_regime,
-            'strategy': session.selected_strategy,
-            'selection_warnings': list(session.selection_warnings),
-            'total_trades': len(trades),
-            'winning_trades': len(winning),
-            'losing_trades': len(losing),
-            'win_rate': len(winning) / len(trades) * 100 if trades else 0,
-            'trades': [t.to_dict() for t in trades],
-            'total_pnl_pct': round(session.total_pnl, 2),
-            'avg_pnl_pct': round(session.total_pnl / len(trades), 2) if trades else 0,
-            'best_trade': round(max(t.pnl_pct for t in trades), 2) if trades else 0,
-            'worst_trade': round(min(t.pnl_pct for t in trades), 2) if trades else 0,
-            'bars_processed': len(session.bars),
-            'pre_market_bars': len(session.pre_market_bars),
-            'regime_history': list(session.regime_history),
-            'success': session.total_pnl > 0,
-        }
+        return build_session_summary(session)
     
     def get_all_sessions(self) -> Dict[str, Dict[str, Any]]:
         """Get all active sessions."""
@@ -1238,105 +998,25 @@ class DayTradingManager:
         
         if not session:
             return None
-        
-        # Close any open position at last price
-        if session.active_position and session.bars:
-            last_price = session.bars[-1].close
-            last_time = session.bars[-1].timestamp
-            self._close_position(
-                session,
-                last_price,
-                last_time,
-                'manual_close',
-                bar_volume=session.bars[-1].volume,
-            )
-        
-        session.phase = SessionPhase.CLOSED
-        if session.bars:
-            session.end_price = session.bars[-1].close
-        self._persist_intraday_levels_memory(session)
-        
-        return self._get_session_summary(session)
+
+        return close_session_and_collect_summary(manager=self, session=session)
     
     def clear_session(self, run_id: str, ticker: str, date: str) -> bool:
         """Clear a session from memory."""
-        key = self._get_session_key(run_id, ticker, date)
-        if key in self.sessions:
-            del self.sessions[key]
-            self.last_trade_bar_index.pop(key, None)
-            defaults_key = (run_id, ticker)
-            memory_key = self._intraday_memory_key(run_id, ticker)
-            # Remove run defaults only when no other sessions for this run/ticker remain.
-            has_other_sessions = any(
-                s.run_id == run_id and s.ticker == ticker for s in self.sessions.values()
-            )
-            if not has_other_sessions:
-                self.run_defaults.pop(defaults_key, None)
-                self.intraday_memory.day_memory.pop(memory_key, None)
-                self.intraday_memory.export_marker = {
-                    marker_key: marker_val
-                    for marker_key, marker_val in self.intraday_memory.export_marker.items()
-                    if not (
-                        marker_key[0] == str(run_id)
-                        and marker_key[1] == str(ticker).upper()
-                    )
-                }
-            has_other_run_sessions = any(
-                s.run_id == run_id for s in self.sessions.values()
-            )
-            if not has_other_run_sessions:
-                self.run_equity_state.pop(run_id, None)
-            return True
-        return False
+        return clear_session_state(
+            manager=self,
+            run_id=run_id,
+            ticker=ticker,
+            date=date,
+        )
 
     def clear_sessions_for_run(self, run_id: str, ticker: Optional[str] = None) -> int:
         """Clear all sessions (and sticky per-run state) for a run_id, optionally by ticker."""
-        normalized_ticker = str(ticker).upper() if ticker else None
-
-        keys_to_clear = [
-            key
-            for key, session in self.sessions.items()
-            if session.run_id == run_id
-            and (normalized_ticker is None or session.ticker == normalized_ticker)
-        ]
-
-        for key in keys_to_clear:
-            self.sessions.pop(key, None)
-            self.last_trade_bar_index.pop(key, None)
-
-        defaults_to_clear = [
-            key
-            for key in self.run_defaults.keys()
-            if key[0] == run_id
-            and (normalized_ticker is None or key[1] == normalized_ticker)
-        ]
-        for key in defaults_to_clear:
-            self.run_defaults.pop(key, None)
-
-        memory_to_clear = [
-            key
-            for key in self.intraday_memory.day_memory.keys()
-            if key[0] == str(run_id)
-            and (normalized_ticker is None or key[1] == normalized_ticker)
-        ]
-        for key in memory_to_clear:
-            self.intraday_memory.day_memory.pop(key, None)
-        self.intraday_memory.export_marker = {
-            key: value
-            for key, value in self.intraday_memory.export_marker.items()
-            if not (
-                key[0] == str(run_id)
-                and (normalized_ticker is None or key[1] == normalized_ticker)
-            )
-        }
-
-        has_other_run_sessions = any(
-            session.run_id == run_id for session in self.sessions.values()
+        return clear_sessions_for_run_state(
+            manager=self,
+            run_id=run_id,
+            ticker=ticker,
         )
-        if not has_other_run_sessions:
-            self.run_equity_state.pop(run_id, None)
-
-        return len(keys_to_clear)
 
     def reset_backtest_state(self, scope: str = "all", clear_sessions: bool = True) -> Dict[str, Any]:
         """
@@ -1347,36 +1027,8 @@ class DayTradingManager:
           - "learning": reset learned trade-memory only
           - "all": reset both (default)
         """
-        normalized_scope = str(scope or "all").strip().lower()
-        if normalized_scope not in {"session", "learning", "all"}:
-            raise ValueError(f"Unsupported reset scope: {scope}")
-
-        sessions_before = len(self.sessions)
-        defaults_before = len(self.run_defaults)
-
-        if clear_sessions:
-            self.sessions.clear()
-            self.last_trade_bar_index.clear()
-            self.run_defaults.clear()
-            self.run_equity_state.clear()
-            self.intraday_memory.day_memory.clear()
-            self.intraday_memory.export_marker.clear()
-
-        orch = self.orchestrator
-        if orch:
-            if normalized_scope == "all":
-                orch.full_reset()
-            elif normalized_scope == "session":
-                orch.new_session()
-            elif normalized_scope == "learning":
-                orch.reset_learning_state()
-
-        return {
-            "scope": normalized_scope,
-            "sessions_before": sessions_before,
-            "sessions_after": len(self.sessions),
-            "run_defaults_before": defaults_before,
-            "run_defaults_after": len(self.run_defaults),
-            "clear_sessions": bool(clear_sessions),
-            "orchestrator_present": orch is not None,
-        }
+        return reset_backtest_state_impl(
+            manager=self,
+            scope=scope,
+            clear_sessions=clear_sessions,
+        )

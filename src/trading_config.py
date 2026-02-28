@@ -185,6 +185,19 @@ class TradingConfig:
     context_risk_level_trail_enabled: bool = True
     context_risk_max_anchor_search_pct: float = 1.5
     context_risk_min_level_tests_for_sl: int = 1
+    # Pullback-specific risk/entry/exit hardening.
+    pullback_context_min_sl_pct: float = 0.50
+    pullback_time_exit_bars: int = 7
+    pullback_morning_window_enabled: bool = True
+    pullback_entry_start_time: str = "10:00"
+    pullback_entry_end_time: str = "11:30"
+    pullback_require_poc_on_trade_side: bool = True
+    pullback_block_choppy_macro: bool = True
+    pullback_blocked_micro_regimes: Tuple[str, ...] = ("CHOPPY", "TRANSITION")
+    pullback_min_price_trend_efficiency: float = 0.15
+    pullback_break_even_proof_required: bool = False
+    pullback_break_even_activation_min_r: float = 0.40
+    pullback_break_even_l2_book_pressure_min: float = 0.03
     l2_gate_mode: str = "weighted"  # "weighted" | "all_pass"
     l2_gate_threshold: float = 0.30
     cold_start_each_day: bool = False
@@ -283,6 +296,18 @@ class TradingConfig:
             )
             return parsed  # empty tuple = allow all
         return None
+
+    @staticmethod
+    def _parse_upper_tuple(value: Any, fallback: Tuple[str, ...]) -> Tuple[str, ...]:
+        if isinstance(value, (list, tuple)):
+            parsed = tuple(
+                str(token).strip().upper()
+                for token in value
+                if str(token).strip()
+            )
+            if parsed:
+                return parsed
+        return tuple(str(token).strip().upper() for token in fallback if str(token).strip())
 
     def merge(self, overrides: Dict[str, Any]) -> "TradingConfig":
         if not isinstance(overrides, dict) or not overrides:

@@ -115,6 +115,72 @@ def build_tail_kwargs(
                 defaults.context_risk_min_level_tests_for_sl,
             ),
         ),
+        pullback_context_min_sl_pct=max(
+            0.0,
+            cls._to_float(
+                raw.get("pullback_context_min_sl_pct"),
+                defaults.pullback_context_min_sl_pct,
+            ),
+        ),
+        pullback_time_exit_bars=max(
+            1,
+            cls._to_int(
+                raw.get("pullback_time_exit_bars"),
+                defaults.pullback_time_exit_bars,
+            ),
+        ),
+        pullback_morning_window_enabled=cls._to_bool(
+            raw.get("pullback_morning_window_enabled"),
+            defaults.pullback_morning_window_enabled,
+        ),
+        pullback_entry_start_time=cls._to_text(
+            raw.get("pullback_entry_start_time"),
+            defaults.pullback_entry_start_time,
+        ),
+        pullback_entry_end_time=cls._to_text(
+            raw.get("pullback_entry_end_time"),
+            defaults.pullback_entry_end_time,
+        ),
+        pullback_require_poc_on_trade_side=cls._to_bool(
+            raw.get("pullback_require_poc_on_trade_side"),
+            defaults.pullback_require_poc_on_trade_side,
+        ),
+        pullback_block_choppy_macro=cls._to_bool(
+            raw.get("pullback_block_choppy_macro"),
+            defaults.pullback_block_choppy_macro,
+        ),
+        pullback_blocked_micro_regimes=cls._parse_upper_tuple(
+            raw.get("pullback_blocked_micro_regimes"),
+            defaults.pullback_blocked_micro_regimes,
+        ),
+        pullback_min_price_trend_efficiency=min(
+            1.0,
+            max(
+                0.0,
+                cls._to_float(
+                    raw.get("pullback_min_price_trend_efficiency"),
+                    defaults.pullback_min_price_trend_efficiency,
+                ),
+            ),
+        ),
+        pullback_break_even_proof_required=cls._to_bool(
+            raw.get("pullback_break_even_proof_required"),
+            defaults.pullback_break_even_proof_required,
+        ),
+        pullback_break_even_activation_min_r=max(
+            0.0,
+            cls._to_float(
+                raw.get("pullback_break_even_activation_min_r"),
+                defaults.pullback_break_even_activation_min_r,
+            ),
+        ),
+        pullback_break_even_l2_book_pressure_min=max(
+            0.0,
+            cls._to_float(
+                raw.get("pullback_break_even_l2_book_pressure_min"),
+                defaults.pullback_break_even_l2_book_pressure_min,
+            ),
+        ),
         l2_gate_mode=str(raw.get("l2_gate_mode", defaults.l2_gate_mode) or defaults.l2_gate_mode).strip().lower(),
         l2_gate_threshold=max(
             0.0,

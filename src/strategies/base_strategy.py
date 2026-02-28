@@ -231,6 +231,9 @@ class BaseStrategy(ABC):
         self.custom_formula_supported_variables = list(SUPPORTED_FORMULA_VARIABLES)
         self.custom_formula_variable_docs = formula_variable_docs()
         self.custom_formula_examples = formula_examples()
+        # Runtime liquidity-sweep-confirmed signals can be enabled/disabled per strategy.
+        self.liquidity_sweep_signal_enabled = True
+        self.liquidity_sweep_signal_priority = 0
         # Strategies that already use L2 internally should set this True
         self._uses_l2_internally = False
         
@@ -499,6 +502,12 @@ class BaseStrategy(ABC):
             'name': self.name,
             'allowed_regimes': [r.value for r in self.allowed_regimes],
             'enabled': self.enabled,
+            'liquidity_sweep_signal_enabled': bool(
+                getattr(self, "liquidity_sweep_signal_enabled", True)
+            ),
+            'liquidity_sweep_signal_priority': int(
+                getattr(self, "liquidity_sweep_signal_priority", 0) or 0
+            ),
             'open_positions': len(self.get_open_positions()),
             'total_signals': len(self.signals_history),
             'last_signal': self.get_last_signal().to_dict() if self.get_last_signal() else None

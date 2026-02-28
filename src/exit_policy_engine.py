@@ -315,7 +315,22 @@ class ExitPolicyEngine:
         except Exception:  # pragma: no cover - fallback for legacy import layouts
             from strategies.base_strategy import Regime
 
-        if session.detected_regime == Regime.CHOPPY:
+        strategy_key = str(getattr(pos, "strategy_name", "") or "").strip().lower()
+        cfg = getattr(session, "config", None)
+        try:
+            pullback_limit = int(
+                max(
+                    1,
+                    float(getattr(cfg, "pullback_time_exit_bars", 7) or 7),
+                )
+            )
+        except (TypeError, ValueError):
+            pullback_limit = 7
+        pullback_specific_limit = strategy_key == "pullback" and pullback_limit > 0
+
+        if pullback_specific_limit:
+            base_limit = float(pullback_limit)
+        elif session.detected_regime == Regime.CHOPPY:
             base_limit = float(session.choppy_time_exit_bars)
         elif session.detected_regime == Regime.TRENDING:
             base_limit = float(session.time_exit_bars) * 1.15
@@ -339,19 +354,22 @@ class ExitPolicyEngine:
         quality_favorable = is_profitable and flow_score > 60.0 and flow_trend > 0
 
         if quality_favorable:
-            limit_bars *= 1.3
+            limit_bars *= 1.15 if pullback_specific_limit else 1.3
         elif favorable:
-            limit_bars *= 1.5
+            limit_bars *= 1.25 if pullback_specific_limit else 1.5
 
         base_should_exit = _bars_held(pos, current_bar_index) >= int(limit_bars)
         regime_name = str(getattr(getattr(session, "detected_regime", None), "value", "") or "")
         formula_ctx = {
+            "strategy": strategy_key,
             "side": str(getattr(pos, "side", "") or ""),
             "bars_held_count": int(_bars_held(pos, current_bar_index)),
             "current_bar_index": int(current_bar_index),
             "entry_price": float(getattr(pos, "entry_price", 0.0) or 0.0),
             "current_price": float(current_price or 0.0),
             "time_exit_bars": int(getattr(session, "time_exit_bars", 0) or 0),
+            "pullback_time_exit_bars": int(pullback_limit),
+            "pullback_specific_limit": bool(pullback_specific_limit),
             "choppy_time_exit_bars": int(getattr(session, "choppy_time_exit_bars", 0) or 0),
             "regime": regime_name,
             "base_limit_bars": float(base_limit),

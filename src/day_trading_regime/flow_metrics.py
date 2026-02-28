@@ -66,6 +66,8 @@ def _calculate_window_flow_components(self, window: List[BarData]) -> Dict[str, 
             or b.l2_bid_depth_total is not None
             or b.l2_ask_depth_total is not None
             or b.l2_iceberg_bias is not None
+            or getattr(b, "tcbbo_has_data", False)
+            or getattr(b, "tcbbo_net_premium", None) is not None
         )
         if has_l2:
             bars_with_l2 += 1

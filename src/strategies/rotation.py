@@ -2,6 +2,7 @@
 Rotation Strategy - For MIXED regime.
 Rotates between positions based on relative strength.
 """
+import math
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
@@ -72,12 +73,25 @@ class RotationStrategy(BaseStrategy):
         
         if vwap is None:
             return None
+
+        def _to_finite_float(value: Any, default: float) -> float:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return default
+            if not math.isfinite(parsed):
+                return default
+            return parsed
             
         vwap_val = vwap[-1] if isinstance(vwap, list) else vwap
-        rsi_val = rsi[-1] if isinstance(rsi, list) else (rsi or 50)
-        sma_val = sma[-1] if isinstance(sma, list) else (sma or current_price)
-        ema_val = ema[-1] if isinstance(ema, list) else (ema or current_price)
-        adx_val = adx[-1] if isinstance(adx, list) else (adx or 20)
+        rsi_raw = rsi[-1] if isinstance(rsi, list) and rsi else rsi
+        sma_raw = sma[-1] if isinstance(sma, list) and sma else sma
+        ema_raw = ema[-1] if isinstance(ema, list) and ema else ema
+        adx_raw = adx[-1] if isinstance(adx, list) and adx else adx
+        rsi_val = _to_finite_float(rsi_raw, 50.0)
+        sma_val = _to_finite_float(sma_raw, current_price)
+        ema_val = _to_finite_float(ema_raw, current_price)
+        adx_val = _to_finite_float(adx_raw, 20.0)
         
         flow = indicators.get("order_flow") or {}
         signed_aggr = float(flow.get("signed_aggression", 0.0) or 0.0)

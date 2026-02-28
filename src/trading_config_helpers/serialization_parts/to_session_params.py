@@ -312,6 +312,26 @@ def trading_config_to_session_params(config: "TradingConfig") -> Dict[str, Any]:
         "context_risk_min_level_tests_for_sl": int(
             config.context_risk_min_level_tests_for_sl
         ),
+        "pullback_context_min_sl_pct": float(config.pullback_context_min_sl_pct),
+        "pullback_time_exit_bars": int(config.pullback_time_exit_bars),
+        "pullback_morning_window_enabled": bool(config.pullback_morning_window_enabled),
+        "pullback_entry_start_time": str(config.pullback_entry_start_time),
+        "pullback_entry_end_time": str(config.pullback_entry_end_time),
+        "pullback_require_poc_on_trade_side": bool(config.pullback_require_poc_on_trade_side),
+        "pullback_block_choppy_macro": bool(config.pullback_block_choppy_macro),
+        "pullback_blocked_micro_regimes": list(config.pullback_blocked_micro_regimes),
+        "pullback_min_price_trend_efficiency": float(
+            config.pullback_min_price_trend_efficiency
+        ),
+        "pullback_break_even_proof_required": bool(
+            config.pullback_break_even_proof_required
+        ),
+        "pullback_break_even_activation_min_r": float(
+            config.pullback_break_even_activation_min_r
+        ),
+        "pullback_break_even_l2_book_pressure_min": float(
+            config.pullback_break_even_l2_book_pressure_min
+        ),
         "l2_gate_mode": str(config.l2_gate_mode),
         "l2_gate_threshold": float(config.l2_gate_threshold),
         "cold_start_each_day": bool(config.cold_start_each_day),

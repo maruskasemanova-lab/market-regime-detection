@@ -88,8 +88,13 @@ class BarData:
             'l2_quality': self.l2_quality,
             'tcbbo_net_premium': self.tcbbo_net_premium,
             'tcbbo_cumulative_net_premium': self.tcbbo_cumulative_net_premium,
+            'tcbbo_call_buy_premium': self.tcbbo_call_buy_premium,
+            'tcbbo_put_buy_premium': self.tcbbo_put_buy_premium,
+            'tcbbo_call_sell_premium': self.tcbbo_call_sell_premium,
+            'tcbbo_put_sell_premium': self.tcbbo_put_sell_premium,
             'tcbbo_sweep_count': self.tcbbo_sweep_count,
             'tcbbo_sweep_premium': self.tcbbo_sweep_premium,
+            'tcbbo_trade_count': self.tcbbo_trade_count,
             'tcbbo_has_data': self.tcbbo_has_data,
         }
 

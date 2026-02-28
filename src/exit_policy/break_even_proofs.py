@@ -176,6 +176,17 @@ def l2_proof_snapshot(
     signed_thr = max(0.0, cfg_float(session, "break_even_l2_signed_aggression_min", 0.12))
     imbalance_thr = max(0.0, cfg_float(session, "break_even_l2_imbalance_min", 0.15))
     book_thr = max(0.0, cfg_float(session, "break_even_l2_book_pressure_min", 0.10))
+    active_pos = getattr(session, "active_position", None)
+    strategy_key = str(getattr(active_pos, "strategy_name", "") or "").strip().lower()
+    if strategy_key == "pullback":
+        cfg_obj = getattr(session, "config", None)
+        try:
+            pullback_book_thr = float(
+                getattr(cfg_obj, "pullback_break_even_l2_book_pressure_min", book_thr) or book_thr
+            )
+        except (TypeError, ValueError):
+            pullback_book_thr = book_thr
+        book_thr = max(0.0, pullback_book_thr)
     spread_max = max(0.0, cfg_float(session, "break_even_l2_spread_bps_max", 12.0))
     spread_ok = spread_bps is None or float(spread_bps) <= spread_max
 

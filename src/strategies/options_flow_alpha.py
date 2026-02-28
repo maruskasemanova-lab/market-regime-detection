@@ -19,23 +19,23 @@ class OptionsFlowAlphaStrategy(BaseStrategy):
     def __init__(
         self,
         # ── Z-Score Lookback ──
-        zscore_lookback_bars: int = 30,
+        zscore_lookback_bars: int = 20,
         # ── Setup 1: Price-Flow Divergence ──
-        divergence_min_price_move_pct: float = 0.15,
+        divergence_min_price_move_pct: float = 0.12,
         divergence_min_premium_z: float = 1.5,
-        divergence_base_confidence: float = 65.0,
+        divergence_base_confidence: float = 72.0,
         # ── Setup 2: Momentum Spike ──
-        momentum_min_premium_z: float = 2.0,
-        momentum_max_opposing_price_pct: float = 0.10,
-        momentum_base_confidence: float = 60.0,
+        momentum_min_premium_z: float = 1.5,
+        momentum_max_opposing_price_pct: float = 0.08,
+        momentum_base_confidence: float = 68.0,
         # ── Setup 3: Sweep Alert ──
-        sweep_multiplier: float = 2.0,
-        sweep_min_count: int = 3,
-        sweep_base_confidence: float = 70.0,
+        sweep_multiplier: float = 1.8,
+        sweep_min_count: int = 2,
+        sweep_base_confidence: float = 74.0,
         # ── Risk ──
-        stop_loss_pct: float = 0.35,
-        take_profit_rr: float = 2.5,
-        trailing_stop_pct: float = 0.25,
+        stop_loss_pct: float = 0.30,
+        take_profit_rr: float = 3.0,
+        trailing_stop_pct: float = 0.20,
     ):
         super().__init__(
             name="options_flow_alpha",
@@ -59,7 +59,7 @@ class OptionsFlowAlphaStrategy(BaseStrategy):
         self.sweep_base_confidence = sweep_base_confidence
 
         # Risk
-        self.stop_loss_pct = stop_loss_pct
+        self.stop_loss_pct = 0.35
         self.take_profit_rr = take_profit_rr
         self.trailing_stop_pct = trailing_stop_pct
 
@@ -289,6 +289,7 @@ class OptionsFlowAlphaStrategy(BaseStrategy):
         has_data = bool(tcbbo.get("is_valid", False)) or bool(
             tcbbo.get("has_data", False)
         )
+        print(f"DEBUG: OptionsFlowAlphaStrategy.generate_signal called, has_data={has_data}")
         if not has_data:
             return None
 
@@ -306,6 +307,7 @@ class OptionsFlowAlphaStrategy(BaseStrategy):
         direction: Optional[str] = None
         confidence = 0.0
         reasoning = ""
+        setups_fired: List[str] = []
 
         # 1. Divergence (highest conviction — smart money vs. retail)
         d, c, r = self._evaluate_divergence(
@@ -313,33 +315,58 @@ class OptionsFlowAlphaStrategy(BaseStrategy):
         )
         if d and c > confidence:
             direction, confidence, reasoning = d, c, r
+            setups_fired.append("divergence")
 
         # 2. Momentum spike
-        d, c, r = self._evaluate_momentum(
+        d2, c2, r2 = self._evaluate_momentum(
             price_return_5, current_net_premium, net_premium_z
         )
-        if d and c > confidence:
-            direction, confidence, reasoning = d, c, r
+        if d2 and c2 > confidence:
+            direction, confidence, reasoning = d2, c2, r2
+        if d2:
+            setups_fired.append("momentum")
 
         # 3. Sweep alert
-        d, c, r = self._evaluate_sweep(
+        d3, c3, r3 = self._evaluate_sweep(
             current_net_premium,
             current_sweep_premium,
             current_sweep_count,
             sweep_premiums,
         )
-        if d and c > confidence:
-            direction, confidence, reasoning = d, c, r
+        if d3 and c3 > confidence:
+            direction, confidence, reasoning = d3, c3, r3
+        if d3:
+            setups_fired.append("sweep")
+
+        # 4. Cumulative premium trend confirmation
+        cum_premium = self._safe_float(tcbbo.get("cumulative_net_premium"))
+        cum_trend_bullish = cum_premium > 0 and current_net_premium > 0
+        cum_trend_bearish = cum_premium < 0 and current_net_premium < 0
 
         if direction is None:
             return None
+
+        print(f"DEBUG: OptionsFlowAlphaStrategy GENERATING SIGNAL: side={direction}, conf={confidence}, reasoning={reasoning}")
+
+        # ── Confluence bonus ──
+        # Multiple setups agree → stronger conviction
+        if len(setups_fired) >= 2:
+            confidence = min(95.0, confidence + 8.0)
+            reasoning += f" [CONFLUENCE: {'+'.join(setups_fired)}]"
+
+        # Cumulative trend aligns with direction → extra boost
+        if (direction == "bullish" and cum_trend_bullish) or (
+            direction == "bearish" and cum_trend_bearish
+        ):
+            confidence = min(95.0, confidence + 5.0)
+            reasoning += " [CUM_TREND_ALIGNED]"
 
         # ── Build signal ──
         side = "long" if direction == "bullish" else "short"
         signal_type = SignalType.BUY if side == "long" else SignalType.SELL
 
         stop_loss = self.calculate_percent_stop(
-            current_price, self.stop_loss_pct / 100.0, side=side
+            current_price, self.stop_loss_pct, side=side
         )
         take_profit = self.calculate_take_profit(
             current_price, stop_loss, rr_ratio=self.take_profit_rr, side=side

@@ -27,7 +27,7 @@ class PullbackStrategy(BaseStrategy):
         ma_slow_period: int = 100,            # ~20 EMA on 5m chart
         volume_lookback: int = 20,
         volume_surge_ratio: float = 1.3,      # Moderate volume confirmation
-        volume_stop_pct: float = 1.5,         # Wider stop for volatile stocks
+        volume_stop_pct: float = 2.5,         # Avoid sub-ATR stops when volume ratio compresses
         rr_ratio: float = 2.0,                # Good R:R
         min_confidence: float = 55.0,         # Lower bar — pullbacks are higher-quality setups
         trailing_stop_pct: float = 1.2        # Trail for runners

@@ -11,9 +11,7 @@ from fastapi.responses import JSONResponse
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
-import math
 import uvicorn
-from datetime import datetime
 
 from src.api_models import (
     BarInput,
@@ -27,17 +25,23 @@ from src.strategy_engine import StrategyEngine
 from src.day_trading_manager import DayTradingManager
 from src.trading_config import TradingConfig
 from src.strategy_formula_engine import (
-    StrategyFormulaValidationError,
     validate_strategy_formula,
 )
-from src.runtime_exit_formulas import normalize_runtime_exit_formula_fields
-from src.api_server_helpers.session_config import (
-    build_session_config_payload,
-    merge_body_payload,
-    parse_momentum_diversification_payload,
-    parse_regime_filter_payload,
-    resolve_json_string_override,
-    resolve_optional_override,
+from src.api_server_helpers.bar_payload import (
+    build_day_trading_bar_payload,
+    parse_bar_timestamp,
+    sanitize_non_finite_numbers,
+)
+from src.api_server_helpers.session_config_apply import (
+    apply_session_config_resolution,
+    resolve_session_config_request,
+)
+from src.api_server_helpers.orchestrator_config import (
+    apply_orchestrator_config_updates,
+    serialize_orchestrator_config,
+)
+from src.api_server_helpers.strategy_update import (
+    apply_strategy_param_updates,
 )
 from src.api_server_helpers.trading_config import (
     apply_global_trading_config,
@@ -255,107 +259,19 @@ async def update_strategy(config: StrategyUpdate):
     
     strat = engine.strategies[strat_name]
     dtm_strat = day_trading_manager.strategies.get(strat_name)
-
-    def _normalize_mode(value: Any) -> Optional[str]:
-        normalized = str(value or "").strip().lower()
-        if normalized in {"global", "custom"}:
-            return normalized
-        return None
-
-    def _normalize_optional_positive(value: Any) -> Optional[float]:
-        if value is None:
-            return None
-        try:
-            parsed = float(value)
-        except (TypeError, ValueError):
-            return None
-        if parsed <= 0:
-            return None
-        return parsed
-    
-    updated_fields = {}
-    for key, val in config.params.items():
-        if key in {"custom_entry_formula", "custom_exit_formula"}:
-            normalized_formula = str(val or "").strip()
-            try:
-                formula_info = validate_strategy_formula(normalized_formula)
-            except StrategyFormulaValidationError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid {key}: {exc}",
-                ) from exc
-            normalized_formula = str(formula_info.get("normalized", "") or "")
-            setattr(strat, key, normalized_formula)
-            updated_fields[key] = normalized_formula
-            if dtm_strat and hasattr(dtm_strat, key):
-                setattr(dtm_strat, key, normalized_formula)
-            continue
-        if key in {"custom_entry_formula_enabled", "custom_exit_formula_enabled"}:
-            normalized_enabled = bool(val)
-            setattr(strat, key, normalized_enabled)
-            updated_fields[key] = normalized_enabled
-            if dtm_strat and hasattr(dtm_strat, key):
-                setattr(dtm_strat, key, normalized_enabled)
-            continue
-        if key == "allowed_regimes" and isinstance(val, list):
-            regimes = coerce_regimes(val)
-            setattr(strat, "allowed_regimes", regimes)
-            updated_fields[key] = [r.value for r in regimes]
-            if dtm_strat:
-                setattr(dtm_strat, "allowed_regimes", regimes)
-            continue
-        if key in {"trailing_stop_mode", "exit_mode"}:
-            mode = _normalize_mode(val)
-            if mode is None:
-                continue
-            setattr(strat, "exit_mode", mode)
-            setattr(strat, "trailing_stop_mode", mode)
-            updated_fields["exit_mode"] = mode
-            updated_fields["trailing_stop_mode"] = mode
-            if dtm_strat:
-                setattr(dtm_strat, "exit_mode", mode)
-                setattr(dtm_strat, "trailing_stop_mode", mode)
-            continue
-        if key == "risk_mode":
-            mode = _normalize_mode(val)
-            if mode is None:
-                continue
-            setattr(strat, "risk_mode", mode)
-            updated_fields[key] = mode
-            if dtm_strat:
-                setattr(dtm_strat, "risk_mode", mode)
-            continue
-        if key in {
-            "global_trailing_stop_pct",
-            "global_rr_ratio",
-            "global_atr_stop_multiplier",
-            "global_volume_stop_pct",
-            "global_min_stop_loss_pct",
-        }:
-            normalized_global = _normalize_optional_positive(val)
-            setattr(strat, key, normalized_global)
-            updated_fields[key] = normalized_global
-            if dtm_strat and hasattr(dtm_strat, key):
-                setattr(dtm_strat, key, normalized_global)
-            continue
-        if key == "trailing_stop_pct":
-            try:
-                normalized_trailing = float(val)
-            except (TypeError, ValueError):
-                continue
-            if normalized_trailing <= 0:
-                continue
-            setattr(strat, "trailing_stop_pct", normalized_trailing)
-            updated_fields[key] = normalized_trailing
-            if dtm_strat and hasattr(dtm_strat, "trailing_stop_pct"):
-                setattr(dtm_strat, "trailing_stop_pct", normalized_trailing)
-            continue
-        # Only update existing attributes and basic numeric/bool/str types
-        if hasattr(strat, key) and isinstance(val, (int, float, bool, str, type(None))):
-            setattr(strat, key, val)
-            updated_fields[key] = val
-            if dtm_strat and hasattr(dtm_strat, key):
-                setattr(dtm_strat, key, val)
+    try:
+        updated_fields = apply_strategy_param_updates(
+            strat=strat,
+            dtm_strat=dtm_strat,
+            params=config.params,
+            validate_formula=validate_strategy_formula,
+            coerce_regimes=coerce_regimes,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
     
     return {
         "strategy": config.strategy_name,
@@ -461,33 +377,13 @@ async def evaluate_intrabar_slice(bar: BarInput):
     Returns the layer scores, signal decision, and thresholds.
     """
     try:
-        timestamp = datetime.fromisoformat(bar.timestamp.replace('Z', '+00:00'))
+        timestamp = parse_bar_timestamp(bar.timestamp)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid timestamp format: {bar.timestamp}")
-    
-    bar_data = {
-        'open': bar.open,
-        'high': bar.high,
-        'low': bar.low,
-        'close': bar.close,
-        'volume': bar.volume,
-        'vwap': bar.vwap,
-        'l2_delta': bar.l2_delta,
-        'l2_buy_volume': bar.l2_buy_volume,
-        'l2_sell_volume': bar.l2_sell_volume,
-        'l2_volume': bar.l2_volume,
-        'l2_imbalance': bar.l2_imbalance,
-        'l2_bid_depth_total': bar.l2_bid_depth_total,
-        'l2_ask_depth_total': bar.l2_ask_depth_total,
-        'l2_book_pressure': bar.l2_book_pressure,
-        'l2_book_pressure_change': bar.l2_book_pressure_change,
-        'l2_iceberg_buy_count': bar.l2_iceberg_buy_count,
-        'l2_iceberg_sell_count': bar.l2_iceberg_sell_count,
-        'l2_iceberg_bias': bar.l2_iceberg_bias,
-        'l2_quality_flags': bar.l2_quality_flags,
-        'l2_quality': bar.l2_quality,
-        'intrabar_quotes_1s': bar.intrabar_quotes_1s,
-    }
+    bar_data = build_day_trading_bar_payload(
+        bar,
+        include_l2_quality_flags=False,
+    )
     
     result = day_trading_manager.evaluate_intrabar_slice(
         run_id=bar.run_id,
@@ -496,16 +392,7 @@ async def evaluate_intrabar_slice(bar: BarInput):
         bar_data=bar_data,
     )
 
-    def _sanitize(obj):
-        if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
-            return None
-        if isinstance(obj, dict):
-            return {k: _sanitize(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return [_sanitize(v) for v in obj]
-        return obj
-        
-    return _sanitize(result)
+    return sanitize_non_finite_numbers(result)
 
 
 @app.post("/api/session/bar")
@@ -523,34 +410,17 @@ async def process_bar(bar: BarInput):
     4. End of day: Closes positions and returns summary
     """
     try:
-        timestamp = datetime.fromisoformat(bar.timestamp.replace('Z', '+00:00'))
+        timestamp = parse_bar_timestamp(bar.timestamp)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid timestamp format: {bar.timestamp}")
+    bar_data = build_day_trading_bar_payload(
+        bar,
+        include_l2_quality_flags=True,
+    )
     
-    bar_data = {
-        'open': bar.open,
-        'high': bar.high,
-        'low': bar.low,
-        'close': bar.close,
-        'volume': bar.volume,
-        'vwap': bar.vwap,
-        'l2_delta': bar.l2_delta,
-        'l2_buy_volume': bar.l2_buy_volume,
-        'l2_sell_volume': bar.l2_sell_volume,
-        'l2_volume': bar.l2_volume,
-        'l2_imbalance': bar.l2_imbalance,
-        'l2_bid_depth_total': bar.l2_bid_depth_total,
-        'l2_ask_depth_total': bar.l2_ask_depth_total,
-        'l2_book_pressure': bar.l2_book_pressure,
-        'l2_book_pressure_change': bar.l2_book_pressure_change,
-        'l2_iceberg_buy_count': bar.l2_iceberg_buy_count,
-        'l2_iceberg_sell_count': bar.l2_iceberg_sell_count,
-        'l2_iceberg_bias': bar.l2_iceberg_bias,
-        'l2_quality_flags': bar.l2_quality_flags,
-        'l2_quality': bar.l2_quality,
-        'intrabar_quotes_1s': bar.intrabar_quotes_1s,
-    }
-    
+    if bar.tcbbo_has_data:
+        print(f"DEBUG: api_server received TCBBO data: has_data={bar.tcbbo_has_data}, net_premium={bar.tcbbo_net_premium}")
+
     result = day_trading_manager.process_bar(
         run_id=bar.run_id,
         ticker=bar.ticker,
@@ -560,15 +430,7 @@ async def process_bar(bar: BarInput):
     )
 
     # Sanitize NaN/Inf values that crash JSON serialization
-    def _sanitize(obj):
-        if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
-            return None
-        if isinstance(obj, dict):
-            return {k: _sanitize(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return [_sanitize(v) for v in obj]
-        return obj
-    result = _sanitize(result)
+    result = sanitize_non_finite_numbers(result)
 
     # Feed cross-asset reference bar to orchestrator if provided
     if bar.ref_ticker and bar.ref_close:
@@ -881,6 +743,7 @@ async def configure_session(
         date=date,
         regime_detection_minutes=regime_detection_minutes
     )
+    local_values = dict(locals())
     query_param_keys = {str(key) for key in request.query_params.keys()}
     body_payload: Dict[str, Any] = {}
     try:
@@ -890,98 +753,29 @@ async def configure_session(
     if isinstance(parsed_body, dict):
         body_payload = parsed_body
 
-    config_payload = build_session_config_payload(dict(locals()))
-    if body_payload:
-        merge_body_payload(
-            config_payload=config_payload,
-            body_payload=body_payload,
-            query_param_keys=query_param_keys,
-        )
-        momentum_diversification_json = resolve_json_string_override(
-            override_key="momentum_diversification_json",
-            override_value=momentum_diversification_json,
-            body_payload=body_payload,
-            query_param_keys=query_param_keys,
-        )
-        regime_filter_json = resolve_json_string_override(
-            override_key="regime_filter_json",
-            override_value=regime_filter_json,
-            body_payload=body_payload,
-            query_param_keys=query_param_keys,
-        )
-        max_daily_trades = resolve_optional_override(
-            override_key="max_daily_trades",
-            override_value=max_daily_trades,
-            body_payload=body_payload,
-            query_param_keys=query_param_keys,
-        )
-        mu_choppy_hard_block_enabled = resolve_optional_override(
-            override_key="mu_choppy_hard_block_enabled",
-            override_value=mu_choppy_hard_block_enabled,
-            body_payload=body_payload,
-            query_param_keys=query_param_keys,
-            copy_null=True,
-        )
-
     try:
-        momentum_diversification_payload = parse_momentum_diversification_payload(
+        resolution = resolve_session_config_request(
+            local_values=local_values,
+            body_payload=body_payload,
+            query_param_keys=query_param_keys,
             momentum_diversification_json=momentum_diversification_json,
-            body_payload=body_payload,
-            query_param_keys=query_param_keys,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if momentum_diversification_payload is not None:
-        config_payload["momentum_diversification"] = momentum_diversification_payload
-
-    try:
-        regime_filter_payload = parse_regime_filter_payload(
             regime_filter_json=regime_filter_json,
-            body_payload=body_payload,
-            query_param_keys=query_param_keys,
+            max_daily_trades=max_daily_trades,
+            mu_choppy_hard_block_enabled=mu_choppy_hard_block_enabled,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if regime_filter_payload is not None:
-        config_payload["regime_filter"] = list(regime_filter_payload)
     try:
-        config_payload.update(normalize_runtime_exit_formula_fields(config_payload))
-        canonical = TradingConfig.from_dict(config_payload)
+        return apply_session_config_resolution(
+            manager=day_trading_manager,
+            session=session,
+            run_id=run_id,
+            ticker=ticker,
+            resolution=resolution,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    day_trading_manager._apply_trading_config_to_session(
-        session,
-        canonical,
-        normalize_momentum=(momentum_diversification_payload is not None),
-    )
-    day_trading_manager.regime_refresh_bars = canonical.regime_refresh_bars
-    day_trading_manager.max_fill_participation_rate = canonical.max_fill_participation_rate
-    day_trading_manager.min_fill_ratio = canonical.min_fill_ratio
-
-    day_trading_manager.set_run_defaults(
-        run_id=run_id,
-        ticker=ticker,
-        trading_config=canonical,
-    )
-    session.max_daily_trades_override = (
-        int(max_daily_trades) if max_daily_trades is not None else None
-    )
-    session.mu_choppy_hard_block_enabled_override = (
-        bool(mu_choppy_hard_block_enabled)
-        if mu_choppy_hard_block_enabled is not None
-        else None
-    )
-    
-    return {
-        "message": "Session configured",
-        "session": session.to_dict(),
-        "overrides": {
-            "max_daily_trades": session.max_daily_trades_override,
-            "mu_choppy_hard_block_enabled": session.mu_choppy_hard_block_enabled_override,
-        },
-    }
 
 
 # ============ Orchestrator Health & Config ============
@@ -1026,25 +820,7 @@ async def get_orchestrator_config():
     orch = day_trading_manager.orchestrator
     if not orch:
         return {"status": "not_initialized"}
-    cfg = orch.config
-    combiner = orch.combiner if hasattr(orch, 'combiner') else None
-    return {
-        "use_evidence_engine": cfg.use_evidence_engine,
-        "use_adaptive_regime": cfg.use_adaptive_regime,
-        "use_calibration": cfg.use_calibration,
-        "use_quality_sizing": cfg.use_quality_sizing,
-        "use_cross_asset": cfg.use_cross_asset,
-        "use_edge_monitor": cfg.use_edge_monitor,
-        "min_confirming_sources": cfg.min_confirming_sources,
-        "base_threshold": cfg.base_threshold,
-        "base_risk_pct": cfg.base_risk_pct,
-        "combiner_base_threshold": combiner._base_threshold if combiner else None,
-        "combiner_min_confirming": combiner._min_confirming if combiner else None,
-        "combiner_min_margin": combiner._min_margin if combiner else None,
-        "combiner_single_source_margin": combiner._single_source_margin if combiner else None,
-        "strategy_weight": cfg.strategy_weight,
-        "strategy_only_threshold": cfg.strategy_only_threshold,
-    }
+    return serialize_orchestrator_config(orch)
 
 
 @app.post("/api/orchestrator/config")
@@ -1053,45 +829,7 @@ async def update_orchestrator_config(body: Dict[str, Any]):
     orch = day_trading_manager.orchestrator
     if not orch:
         raise HTTPException(400, "Orchestrator not initialized")
-    cfg = orch.config
-    updated = {}
-    for flag in ('use_evidence_engine', 'use_adaptive_regime',
-                 'use_calibration', 'use_quality_sizing',
-                 'use_cross_asset', 'use_edge_monitor'):
-        if flag in body:
-            setattr(cfg, flag, bool(body[flag]))
-            updated[flag] = bool(body[flag])
-    for param in ('min_confirming_sources', 'base_threshold', 'base_risk_pct',
-                   'min_margin_over_threshold', 'single_source_min_margin',
-                   'strategy_weight', 'strategy_only_threshold'):
-        if param in body:
-            val = float(body[param]) if param != 'min_confirming_sources' else int(body[param])
-            setattr(cfg, param, val)
-            updated[param] = val
-
-    # Propagate threshold/margin changes to sub-components so they take effect
-    # immediately (the config dataclass alone is not re-read at runtime).
-    if any(k in body for k in ('base_threshold', 'min_confirming_sources',
-                                'min_margin_over_threshold', 'single_source_min_margin')):
-        if hasattr(orch, 'combiner') and orch.combiner is not None:
-            if 'base_threshold' in body:
-                orch.combiner._base_threshold = float(body['base_threshold'])
-            if 'min_confirming_sources' in body:
-                orch.combiner._min_confirming = int(body['min_confirming_sources'])
-            if 'min_margin_over_threshold' in body:
-                orch.combiner._min_margin = float(body['min_margin_over_threshold'])
-            if 'single_source_min_margin' in body:
-                orch.combiner._single_source_margin = float(body['single_source_min_margin'])
-        if hasattr(orch, 'evidence_engine') and orch.evidence_engine is not None:
-            if 'base_threshold' in body:
-                orch.evidence_engine._base_threshold = float(body['base_threshold'])
-            if 'min_confirming_sources' in body:
-                orch.evidence_engine._min_confirming = int(body['min_confirming_sources'])
-    # Propagate orchestrator weight changes to evidence engine
-    if 'strategy_only_threshold' in body:
-        if hasattr(orch, 'evidence_engine') and orch.evidence_engine is not None:
-            orch.evidence_engine._strategy_only_threshold = float(body['strategy_only_threshold'])
-
+    updated = apply_orchestrator_config_updates(orch=orch, body=body)
     return {"message": "Orchestrator config updated", "updated": updated}
 
 
