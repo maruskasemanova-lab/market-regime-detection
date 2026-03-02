@@ -336,6 +336,121 @@ def test_intrabar_eval_trace_re_evaluates_checkpoint_layer_scores() -> None:
     assert len(session.orchestrator.evidence_engine.observed_closes) == 3
 
 
+def test_intrabar_eval_reuses_checkpoint_indicators_without_cross_checkpoint_staleness(
+    monkeypatch,
+) -> None:
+    manager = DayTradingManager(
+        regime_detection_minutes=0,
+        trade_cooldown_bars=0,
+        max_trades_per_day=10,
+    )
+    session = manager.get_or_create_session("run", "MU", "2026-02-03")
+    session.phase = SessionPhase.TRADING
+    session.selected_strategy = "momentum_flow"
+    session.detected_regime = Regime.TRENDING
+    session.micro_regime = "TRENDING_UP"
+    session.active_strategies = ["momentum_flow"]
+    session.config = TradingConfig.from_dict({"intrabar_eval_step_seconds": 5})
+
+    warmup_start = datetime(2026, 2, 3, 14, 30, tzinfo=timezone.utc)
+    for idx in range(12):
+        ts = warmup_start + timedelta(minutes=idx)
+        close = 100.0 + (0.1 * idx)
+        session.bars.append(
+            BarData(
+                timestamp=ts,
+                open=close - 0.05,
+                high=close + 0.10,
+                low=close - 0.10,
+                close=close,
+                volume=100_000.0 + (idx * 100.0),
+                vwap=close,
+            )
+        )
+
+    ts = datetime(2026, 2, 3, 15, 1, tzinfo=timezone.utc)
+    intrabar_quotes = []
+    for sec in range(1, 13):
+        mid = 100.0 + (0.2 * sec)
+        intrabar_quotes.append({"s": sec, "bid": mid - 0.01, "ask": mid + 0.01})
+
+    bar = BarData(
+        timestamp=ts,
+        open=100.0,
+        high=103.0,
+        low=99.8,
+        close=102.4,
+        volume=120_000.0,
+        vwap=101.0,
+        intrabar_quotes_1s=intrabar_quotes,
+    )
+    session.bars.append(bar)
+
+    import src.day_trading_manager as manager_module
+
+    runtime_calc_calls = 0
+    base_runtime_calc = manager_module.runtime_calculate_indicators
+
+    def _counted_runtime_calc(*args, **kwargs):
+        nonlocal runtime_calc_calls
+        runtime_calc_calls += 1
+        return base_runtime_calc(*args, **kwargs)
+
+    monkeypatch.setattr(manager_module, "runtime_calculate_indicators", _counted_runtime_calc)
+
+    class _StubEvidenceEngine:
+        def __init__(self):
+            self.observed_indicator_vwaps: List[float] = []
+
+        def evaluate(self, **kwargs) -> DecisionResult:
+            gen_signal_fn = kwargs.get("generate_signal_fn")
+            if callable(gen_signal_fn):
+                gen_signal_fn()
+            indicators = kwargs.get("indicators") or {}
+            vwap_series = indicators.get("vwap") or []
+            vwap_now = float(vwap_series[-1]) if vwap_series else 0.0
+            self.observed_indicator_vwaps.append(vwap_now)
+            return DecisionResult(
+                execute=False,
+                direction="bullish",
+                signal=None,
+                combined_score=vwap_now,
+                combined_raw=vwap_now,
+                combined_norm_0_100=vwap_now,
+                strategy_score=vwap_now,
+                threshold=999.0,
+                trade_gate_threshold=999.0,
+                reasoning="cache-test",
+            )
+
+    class _StubConfig:
+        use_evidence_engine = True
+
+    class _StubOrchestrator:
+        def __init__(self):
+            self.config = _StubConfig()
+            self.evidence_engine = _StubEvidenceEngine()
+            self.current_feature_vector = None
+            self.current_regime_state = None
+            self.current_cross_asset_state = CrossAssetState()
+
+        def checkpoint_feature_vector(self, checkpoint_bar, pre_bar_fv=None):
+            return None
+
+    session.orchestrator = _StubOrchestrator()
+
+    result = manager._process_trading_bar(session, bar, ts)
+
+    trace = result.get("intrabar_eval_trace", {})
+    assert trace.get("checkpoint_count") == 3
+    # 1 minute-bar context compute + 3 checkpoint computes; no duplicate
+    # recompute from generate_signal_fn inside each checkpoint.
+    assert runtime_calc_calls == 4
+    observed = session.orchestrator.evidence_engine.observed_indicator_vwaps
+    assert len(observed) == 3
+    assert observed[0] < observed[1] < observed[2]
+
+
 def test_l2_confirmation_hard_book_pressure_block_long() -> None:
     manager = DayTradingManager(regime_detection_minutes=0)
     session = manager.get_or_create_session("run", "MU", "2026-02-03")

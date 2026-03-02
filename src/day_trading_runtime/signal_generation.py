@@ -17,6 +17,7 @@ def runtime_generate_signal(
     session: TradingSession,
     bar: BarData,
     timestamp: datetime,
+    precomputed_indicators: Optional[Dict[str, Any]] = None,
 ) -> Optional[Signal]:
     """
     Generate trading signal using ALL active strategies.
@@ -38,7 +39,11 @@ def runtime_generate_signal(
         "close": [b.close for b in bars],
         "volume": [b.volume for b in bars],
     }
-    indicators = self._calculate_indicators(bars, session=session)
+    indicators = (
+        precomputed_indicators
+        if isinstance(precomputed_indicators, dict)
+        else self._calculate_indicators(bars, session=session)
+    )
     regime = session.detected_regime or Regime.MIXED
 
     candidate_signals = []

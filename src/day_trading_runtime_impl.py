@@ -179,12 +179,14 @@ def runtime_generate_signal(
     session: TradingSession,
     bar: BarData,
     timestamp: datetime,
+    precomputed_indicators: Optional[Dict[str, Any]] = None,
 ) -> Optional[Signal]:
     return _runtime_generate_signal_impl(
         self=self,
         session=session,
         bar=bar,
         timestamp=timestamp,
+        precomputed_indicators=precomputed_indicators,
     )
 
 

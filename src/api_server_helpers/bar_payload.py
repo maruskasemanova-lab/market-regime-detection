@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import math
-from typing import Any, Dict
+from typing import Any, Dict, Mapping
 
 
 _BASE_BAR_FIELDS = (
@@ -50,8 +50,10 @@ _TCBBO_BAR_FIELDS = (
 )
 
 
-def parse_bar_timestamp(timestamp_value: str) -> datetime:
+def parse_bar_timestamp(timestamp_value: Any) -> datetime:
     """Parse API timestamp value used by session endpoints."""
+    if isinstance(timestamp_value, datetime):
+        return timestamp_value
     return datetime.fromisoformat(str(timestamp_value).replace("Z", "+00:00"))
 
 
@@ -71,6 +73,25 @@ def build_day_trading_bar_payload(
     return payload
 
 
+def build_day_trading_bar_payload_from_mapping(
+    bar: Mapping[str, Any],
+    *,
+    include_l2_quality_flags: bool = False,
+) -> Dict[str, Any]:
+    """Build manager-facing bar payload from a dict-like batch row."""
+    payload: Dict[str, Any] = {}
+    for key in (*_BASE_BAR_FIELDS, *_L2_BAR_FIELDS, *_INTRABAR_FIELDS, *_TCBBO_BAR_FIELDS):
+        payload[key] = bar.get(key)
+
+    if payload.get("l2_book_pressure_change") is None and "l2_book_pressure_delta" in bar:
+        payload["l2_book_pressure_change"] = bar.get("l2_book_pressure_delta")
+
+    if include_l2_quality_flags:
+        payload["l2_quality_flags"] = bar.get("l2_quality_flags")
+
+    return payload
+
+
 def sanitize_non_finite_numbers(value: Any) -> Any:
     """Recursively replace NaN/Inf with None for JSON serialization safety."""
     if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
@@ -84,6 +105,7 @@ def sanitize_non_finite_numbers(value: Any) -> Any:
 
 __all__ = [
     "build_day_trading_bar_payload",
+    "build_day_trading_bar_payload_from_mapping",
     "parse_bar_timestamp",
     "sanitize_non_finite_numbers",
 ]

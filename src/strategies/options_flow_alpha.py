@@ -8,9 +8,12 @@ Three independent setups:
   3. Sweep Alert            – whale sweep activity as directional confirmation
 """
 from datetime import datetime
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base_strategy import BaseStrategy, Regime, Signal, SignalType
+
+logger = logging.getLogger(__name__)
 
 
 class OptionsFlowAlphaStrategy(BaseStrategy):
@@ -289,7 +292,10 @@ class OptionsFlowAlphaStrategy(BaseStrategy):
         has_data = bool(tcbbo.get("is_valid", False)) or bool(
             tcbbo.get("has_data", False)
         )
-        print(f"DEBUG: OptionsFlowAlphaStrategy.generate_signal called, has_data={has_data}")
+        logger.debug(
+            "OptionsFlowAlphaStrategy.generate_signal called, has_data=%s",
+            has_data,
+        )
         if not has_data:
             return None
 
@@ -346,7 +352,12 @@ class OptionsFlowAlphaStrategy(BaseStrategy):
         if direction is None:
             return None
 
-        print(f"DEBUG: OptionsFlowAlphaStrategy GENERATING SIGNAL: side={direction}, conf={confidence}, reasoning={reasoning}")
+        logger.debug(
+            "OptionsFlowAlphaStrategy generating signal: side=%s conf=%.2f reasoning=%s",
+            direction,
+            confidence,
+            reasoning,
+        )
 
         # ── Confluence bonus ──
         # Multiple setups agree → stronger conviction

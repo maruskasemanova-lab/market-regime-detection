@@ -98,7 +98,12 @@ def runtime_evaluate_intrabar_slice(
         original_bars = session.bars
         session.bars = bars_data
         try:
-            return self._generate_signal(session, bar, timestamp)
+            return self._generate_signal(
+                session,
+                bar,
+                timestamp,
+                precomputed_indicators=indicators,
+            )
         finally:
             session.bars = original_bars
 

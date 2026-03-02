@@ -1,5 +1,5 @@
 """Tests for EvidenceScalpStrategy v2 (Micro-Scalper)."""
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -140,6 +140,23 @@ class TestEvidenceMicroScalpCooldown:
         ts3 = datetime(2026, 2, 23, 10, 30, 6)  # 6s later
         sig3 = strat.generate_signal(100.0, ohlcv, indicators, Regime.TRENDING, ts3)
         assert sig3 is not None  # passed cooldown
+
+    def test_cooldown_handles_mixed_naive_and_aware_timestamps(self):
+        strat = EvidenceScalpStrategy(min_signal_interval_seconds=5)
+        ohlcv = _make_ohlcv()
+        indicators = _base_indicators(move_pct=0.03, push_ratio=0.8, aggr=0.06)
+
+        ts1_aware = datetime(2026, 2, 23, 10, 30, 0, tzinfo=timezone.utc)
+        sig1 = strat.generate_signal(100.0, ohlcv, indicators, Regime.TRENDING, ts1_aware)
+        assert sig1 is not None
+
+        ts2_naive = datetime(2026, 2, 23, 10, 30, 2)
+        sig2 = strat.generate_signal(100.0, ohlcv, indicators, Regime.TRENDING, ts2_naive)
+        assert sig2 is None  # blocked by cooldown, no TypeError on mixed tz awareness
+
+        ts3_naive = datetime(2026, 2, 23, 10, 30, 6)
+        sig3 = strat.generate_signal(100.0, ohlcv, indicators, Regime.TRENDING, ts3_naive)
+        assert sig3 is not None
 
 
 class TestEvidenceMicroScalpCostGuard:

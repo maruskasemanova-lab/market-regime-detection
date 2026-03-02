@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from src.api_models import BarInput
 from src.api_server_helpers.bar_payload import (
     build_day_trading_bar_payload,
@@ -50,6 +52,12 @@ def test_build_day_trading_bar_payload_respects_l2_quality_flag_toggle():
 def test_parse_bar_timestamp_accepts_zulu_suffix():
     parsed = parse_bar_timestamp("2026-02-27T14:30:00Z")
     assert parsed.isoformat() == "2026-02-27T14:30:00+00:00"
+
+
+def test_parse_bar_timestamp_passthroughs_datetime():
+    source = datetime(2026, 2, 27, 14, 30, tzinfo=timezone.utc)
+    parsed = parse_bar_timestamp(source)
+    assert parsed is source
 
 
 def test_sanitize_non_finite_numbers_recursive():

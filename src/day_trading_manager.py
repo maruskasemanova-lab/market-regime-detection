@@ -838,13 +838,15 @@ class DayTradingManager:
         self, 
         session: TradingSession, 
         bar: BarData, 
-        timestamp: datetime
+        timestamp: datetime,
+        precomputed_indicators: Optional[Dict[str, Any]] = None,
     ) -> Optional[Signal]:
         return runtime_generate_signal(
             self=self,
             session=session,
             bar=bar,
             timestamp=timestamp,
+            precomputed_indicators=precomputed_indicators,
         )
 
 
@@ -859,6 +861,7 @@ class DayTradingManager:
             current_bar_index=current_bar_index,
         )
         session.intraday_levels_state = state
+        self._clear_indicator_cache(session)
         snapshot = state.get("snapshot")
         if isinstance(snapshot, dict) and snapshot:
             return snapshot
@@ -891,12 +894,83 @@ class DayTradingManager:
     def _intraday_memory_key(run_id: str, ticker: str) -> tuple[str, str]:
         return IntradayMemoryService._intraday_memory_key(run_id, ticker)
 
+    @staticmethod
+    def _clear_indicator_cache(session: TradingSession) -> None:
+        setattr(session, "_indicator_cache_key", None)
+        setattr(session, "_indicator_cache_value", None)
+
+    @staticmethod
+    def _intraday_levels_cache_marker(session: TradingSession) -> Tuple[int, int, int, int]:
+        state = getattr(session, "intraday_levels_state", None)
+        if not isinstance(state, dict):
+            return (-1, 0, 0, 0)
+        levels = state.get("levels")
+        recent_events = state.get("recent_events")
+        return (
+            int(state.get("last_bar_index", -1) or -1),
+            int(state.get("next_level_id", 0) or 0),
+            len(levels) if isinstance(levels, list) else 0,
+            len(recent_events) if isinstance(recent_events, list) else 0,
+        )
+
+    @staticmethod
+    def _build_indicator_cache_key(
+        bars: List[BarData],
+        session: TradingSession,
+    ) -> Tuple[Any, ...]:
+        bar_ids = tuple(id(bar) for bar in bars)
+        last_bar = bars[-1] if bars else None
+        if last_bar is None:
+            last_bar_marker: Tuple[Any, ...] = (None,)
+            intrabar_marker: Tuple[Any, ...] = (0, -1, 0.0, 0.0)
+        else:
+            last_bar_marker = (
+                last_bar.timestamp,
+                float(last_bar.open),
+                float(last_bar.high),
+                float(last_bar.low),
+                float(last_bar.close),
+                float(last_bar.volume),
+                float(last_bar.vwap) if last_bar.vwap is not None else None,
+            )
+            raw_quotes = getattr(last_bar, "intrabar_quotes_1s", None)
+            if isinstance(raw_quotes, list) and raw_quotes:
+                tail = raw_quotes[-1] if isinstance(raw_quotes[-1], dict) else {}
+                intrabar_marker = (
+                    len(raw_quotes),
+                    int(float(tail.get("s", -1) or -1)),
+                    float(tail.get("bid", 0.0) or 0.0),
+                    float(tail.get("ask", 0.0) or 0.0),
+                )
+            else:
+                intrabar_marker = (0, -1, 0.0, 0.0)
+
+        return (
+            len(bars),
+            bar_ids,
+            last_bar_marker,
+            intrabar_marker,
+            DayTradingManager._intraday_levels_cache_marker(session),
+        )
+
     def _calculate_indicators(
         self,
         bars: List[BarData],
         session: Optional[TradingSession] = None,
     ) -> Dict[str, Any]:
-        return runtime_calculate_indicators(self=self, bars=bars, session=session)
+        if not isinstance(session, TradingSession):
+            return runtime_calculate_indicators(self=self, bars=bars, session=session)
+
+        cache_key = self._build_indicator_cache_key(bars, session)
+        cached_key = getattr(session, "_indicator_cache_key", None)
+        cached_value = getattr(session, "_indicator_cache_value", None)
+        if cache_key == cached_key and isinstance(cached_value, dict):
+            return cached_value
+
+        indicators = runtime_calculate_indicators(self=self, bars=bars, session=session)
+        setattr(session, "_indicator_cache_key", cache_key)
+        setattr(session, "_indicator_cache_value", indicators)
+        return indicators
 
 
     @staticmethod

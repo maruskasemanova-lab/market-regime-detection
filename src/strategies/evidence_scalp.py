@@ -5,7 +5,7 @@ Designed exclusively for 5-second checkpoints, leveraging live order flow (L2)
 and options flow (TCBBO) alongside high-frequency price action (push ratio)
 to execute rapid, high-quantity scalps with tight stops.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base_strategy import BaseStrategy, Regime, Signal, SignalType
@@ -58,6 +58,12 @@ class EvidenceScalpStrategy(BaseStrategy):
         self.min_signal_interval_seconds = max(0, int(min_signal_interval_seconds))
 
         self._last_signal_ts: Optional[datetime] = None
+
+    @staticmethod
+    def _normalize_timestamp_utc(ts: datetime) -> datetime:
+        if ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
 
     def _evaluate_scalp_setup(
         self, current_price: float, indicators: Dict[str, Any]
@@ -135,9 +141,11 @@ class EvidenceScalpStrategy(BaseStrategy):
         if len(self.get_open_positions()) > 0:
             return None
 
+        normalized_timestamp = self._normalize_timestamp_utc(timestamp)
+
         # Cooldown prevents immediate rapid-fire in the same direction
         if self._last_signal_ts is not None and self.min_signal_interval_seconds > 0:
-            elapsed = (timestamp - self._last_signal_ts).total_seconds()
+            elapsed = (normalized_timestamp - self._last_signal_ts).total_seconds()
             if elapsed < self.min_signal_interval_seconds:
                 return None
 
@@ -193,7 +201,7 @@ class EvidenceScalpStrategy(BaseStrategy):
         )
 
         self.add_signal(signal)
-        self._last_signal_ts = timestamp
+        self._last_signal_ts = normalized_timestamp
         return signal
 
     def to_dict(self) -> Dict[str, Any]:

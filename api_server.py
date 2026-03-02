@@ -2,6 +2,7 @@
 FastAPI Server for Trading Strategy System.
 Connects to the existing backtest API on localhost:8000.
 """
+from io import BytesIO
 import os
 import re
 
@@ -9,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Mapping
 from urllib.parse import urlparse
 import uvicorn
 
@@ -29,6 +30,7 @@ from src.strategy_formula_engine import (
 )
 from src.api_server_helpers.bar_payload import (
     build_day_trading_bar_payload,
+    build_day_trading_bar_payload_from_mapping,
     parse_bar_timestamp,
     sanitize_non_finite_numbers,
 )
@@ -49,6 +51,11 @@ from src.api_server_helpers.trading_config import (
     read_global_trading_config,
     read_trading_limits,
 )
+
+try:
+    import polars as pl
+except Exception:  # pragma: no cover - optional dependency in some runtime envs
+    pl = None
 
 
 
@@ -178,6 +185,78 @@ engine = StrategyEngine(backtest_api_url="http://localhost:8000")
 
 # Day trading manager for session-based API
 day_trading_manager = DayTradingManager(regime_detection_minutes=5)
+
+
+def _field_value(source: Any, key: str) -> Any:
+    if isinstance(source, Mapping):
+        return source.get(key)
+    return getattr(source, key, None)
+
+
+def _apply_reference_bar_update(source: Any) -> None:
+    ref_ticker = _field_value(source, "ref_ticker")
+    ref_close = _field_value(source, "ref_close")
+    if not ref_ticker or ref_close is None:
+        return
+
+    orch = day_trading_manager.orchestrator
+    if not orch or not orch.config.use_cross_asset:
+        return
+
+    ref_bar = {
+        "open": _field_value(source, "ref_open") or ref_close,
+        "high": _field_value(source, "ref_high") or ref_close,
+        "low": _field_value(source, "ref_low") or ref_close,
+        "close": ref_close,
+        "volume": _field_value(source, "ref_volume") or 0,
+    }
+    orch.update_cross_asset(str(ref_ticker), ref_bar)
+    orch.update_target_cross_asset(
+        {
+            "close": _field_value(source, "close"),
+            "volume": _field_value(source, "volume"),
+        }
+    )
+
+
+def _process_session_bar_payload(source: Any) -> Dict[str, Any]:
+    timestamp_value = _field_value(source, "timestamp")
+    if timestamp_value is None:
+        raise HTTPException(status_code=400, detail="Missing timestamp")
+    try:
+        timestamp = parse_bar_timestamp(timestamp_value)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid timestamp format: {timestamp_value}",
+        )
+
+    run_id = _field_value(source, "run_id")
+    ticker = _field_value(source, "ticker")
+    if not run_id or not ticker:
+        raise HTTPException(status_code=400, detail="Missing run_id or ticker")
+
+    if isinstance(source, Mapping):
+        bar_data = build_day_trading_bar_payload_from_mapping(
+            source,
+            include_l2_quality_flags=True,
+        )
+    else:
+        bar_data = build_day_trading_bar_payload(
+            source,
+            include_l2_quality_flags=True,
+        )
+
+    result = day_trading_manager.process_bar(
+        run_id=str(run_id),
+        ticker=str(ticker),
+        timestamp=timestamp,
+        bar_data=bar_data,
+        warmup_only=bool(_field_value(source, "warmup_only")),
+    )
+    result = sanitize_non_finite_numbers(result)
+    _apply_reference_bar_update(source)
+    return result
 
 
 # ============ API Endpoints ============
@@ -409,47 +488,68 @@ async def process_bar(bar: BarInput):
     3. After regime detection: Selects strategy and trades
     4. End of day: Closes positions and returns summary
     """
-    try:
-        timestamp = parse_bar_timestamp(bar.timestamp)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid timestamp format: {bar.timestamp}")
-    bar_data = build_day_trading_bar_payload(
-        bar,
-        include_l2_quality_flags=True,
-    )
-    
     if bar.tcbbo_has_data:
-        print(f"DEBUG: api_server received TCBBO data: has_data={bar.tcbbo_has_data}, net_premium={bar.tcbbo_net_premium}")
+        print(
+            "DEBUG: api_server received TCBBO data: "
+            f"has_data={bar.tcbbo_has_data}, net_premium={bar.tcbbo_net_premium}"
+        )
+    return _process_session_bar_payload(bar)
 
-    result = day_trading_manager.process_bar(
-        run_id=bar.run_id,
-        ticker=bar.ticker,
-        timestamp=timestamp,
-        bar_data=bar_data,
-        warmup_only=bool(bar.warmup_only),
-    )
 
-    # Sanitize NaN/Inf values that crash JSON serialization
-    result = sanitize_non_finite_numbers(result)
+@app.post("/api/session/bars")
+async def process_bars(request: Request):
+    """
+    Process a batch of bars for a trading session.
 
-    # Feed cross-asset reference bar to orchestrator if provided
-    if bar.ref_ticker and bar.ref_close:
-        orch = day_trading_manager.orchestrator
-        if orch and orch.config.use_cross_asset:
-            ref_bar = {
-                'open': bar.ref_open or bar.ref_close,
-                'high': bar.ref_high or bar.ref_close,
-                'low': bar.ref_low or bar.ref_close,
-                'close': bar.ref_close,
-                'volume': bar.ref_volume or 0,
-            }
-            orch.update_cross_asset(bar.ref_ticker, ref_bar)
-            orch.update_target_cross_asset({
-                'close': bar.close,
-                'volume': bar.volume,
-            })
+    Accepts Arrow IPC (`application/vnd.apache.arrow.stream`) for the fast path,
+    with JSON list/`{\"bars\": [...]}` as a compatibility fallback.
+    """
+    content_type = str(request.headers.get("content-type") or "").lower()
+    if "application/vnd.apache.arrow.stream" in content_type:
+        if pl is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Polars is required for Arrow IPC batch ingestion",
+            )
+        raw_body = await request.body()
+        try:
+            rows = pl.read_ipc(BytesIO(raw_body)).to_dicts()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid Arrow IPC payload: {str(exc)}",
+            ) from exc
+    else:
+        try:
+            parsed_body = await request.json()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid JSON batch payload: {str(exc)}",
+            ) from exc
+        if isinstance(parsed_body, dict):
+            rows = parsed_body.get("bars")
+        else:
+            rows = parsed_body
+        if not isinstance(rows, list):
+            raise HTTPException(
+                status_code=400,
+                detail="Batch payload must be a list of bars or {'bars': [...]}",
+            )
 
-    return result
+    results: List[Dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid batch row at index {index}",
+            )
+        results.append(_process_session_bar_payload(row))
+
+    return {
+        "results": results,
+        "bars_processed": len(results),
+    }
 
 
 @app.get("/api/session")
