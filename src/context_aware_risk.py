@@ -38,11 +38,14 @@ def _extract_opening(levels_payload: Dict[str, Any]) -> Dict[str, Any]:
 
 _STRATEGY_ROOM_DEFAULTS: Dict[str, Dict[str, float]] = {
     "momentum":       {"min_room_pct": 0.08, "min_effective_rr": 0.8},
+    "momentum_flow":  {"min_room_pct": 0.08, "min_effective_rr": 0.8},
     "pullback":       {"min_room_pct": 0.05, "min_effective_rr": 0.6},
     "mean_reversion": {"min_room_pct": 0.03, "min_effective_rr": 0.4},
     "rotation":       {"min_room_pct": 0.02, "min_effective_rr": 0.3},
     "vwap_magnet":    {"min_room_pct": 0.03, "min_effective_rr": 0.4},
     "volumeprofile":  {"min_room_pct": 0.03, "min_effective_rr": 0.4},
+    "evidence_scalp": {"min_room_pct": 0.08, "min_effective_rr": 0.8},
+    "level_fade":     {"min_room_pct": 0.05, "min_effective_rr": 0.6},
 }
 
 
@@ -62,17 +65,21 @@ class ContextRiskConfig:
     sweep_atr_buffer_multiplier: float = 0.5
 
     def effective_min_room_pct(self, strategy_key: str = "") -> float:
+        """Return the effective minimum room %.  Uses max(config, strategy_default)
+        so per-ticker config can never bypass strategy-specific safety floors."""
         key = str(strategy_key or "").strip().lower()
         defaults = _STRATEGY_ROOM_DEFAULTS.get(key)
-        if defaults and self.min_room_pct == 0.15:
-            return defaults["min_room_pct"]
+        if defaults:
+            return max(self.min_room_pct, defaults["min_room_pct"])
         return self.min_room_pct
 
     def effective_min_rr(self, strategy_key: str = "") -> float:
+        """Return the effective minimum RR.  Uses max(config, strategy_default)
+        so per-ticker config can never bypass strategy-specific safety floors."""
         key = str(strategy_key or "").strip().lower()
         defaults = _STRATEGY_ROOM_DEFAULTS.get(key)
-        if defaults and self.min_effective_rr == 0.8:
-            return defaults["min_effective_rr"]
+        if defaults:
+            return max(self.min_effective_rr, defaults["min_effective_rr"])
         return self.min_effective_rr
 
     def effective_min_sl_pct(self, strategy_key: str = "") -> float:

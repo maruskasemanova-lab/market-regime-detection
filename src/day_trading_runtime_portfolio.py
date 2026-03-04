@@ -30,12 +30,33 @@ def unrealized_pnl_dollars(
 
     costs_total = 0.0
     try:
+        # Prepare dynamic slippage inputs for unrealized PnL
+        spread_bps = 2.0
+        atr_1m_pct = 0.1
+        l2_coverage_ratio = 1.0
+        
+        if hasattr(session, "manager") and session.manager:
+            intrabar_metrics = session.manager._calculate_intrabar_metrics(session.bars[-1:] if session.bars else [])
+            spread_bps = float(intrabar_metrics.get("spread_bps_avg", 2.0) or 2.0)
+            
+            flow_metrics = session.manager._calculate_order_flow_metrics(session.bars, lookback=3)
+            l2_coverage_ratio = float(flow_metrics.get("l2_quality_coverage_ratio", 1.0) or 1.0)
+            
+            indicators = session.manager._calculate_indicators(session.bars[-20:] if len(session.bars) >= 20 else session.bars, session=session)
+            atr = float(session.manager._latest_indicator_value(indicators, "atr") or 0.0)
+            atr_1m_pct = (atr / current_price) * 100.0 if current_price > 0 else 0.1
+
         costs = trading_costs.calculate_costs(
             entry_price=pos.entry_price,
             exit_price=current_price,
             shares=shares,
             side=pos.side,
             avg_bar_volume=bar_volume,
+            spread_bps=spread_bps,
+            atr_1m_pct=atr_1m_pct,
+            l2_coverage_ratio=l2_coverage_ratio,
+            strategy_name=pos.strategy_name,
+            is_unrealized=True,
         )
         costs_total = float(costs.get("total", 0.0) or 0.0)
     except Exception:

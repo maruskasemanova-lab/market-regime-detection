@@ -40,8 +40,14 @@ def is_midday_window(bar_time: time) -> bool:
     return midday_start <= bar_time < midday_end
 
 
+def is_dead_zone_window(bar_time: time) -> bool:
+    """Return True for ET 11:00-12:00 dead zone (0% WR on MU analysis)."""
+    return time(11, 0) <= bar_time < time(12, 0)
+
+
 __all__ = [
     "bars_held",
+    "is_dead_zone_window",
     "is_midday_window",
     "safe_div",
     "safe_intrabar_quote",

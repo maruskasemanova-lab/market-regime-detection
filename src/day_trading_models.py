@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from enum import Enum
+import math
 from typing import Any, Dict, List, Optional
 
 from .exit_policy_engine import ContextAwareExitPolicy
@@ -179,7 +180,16 @@ class TradingCosts:
     commission_min: float = 0.15      # per order (per side)
     # 0.59¢ per side so round-trip slippage totals ~1.18¢ per share.
     slippage_per_share: float = 0.0059
-    # Slippage and impact realism controls.
+    
+    # Dynamic Slippage Model Parameters (in basis points)
+    slippage_k_part: float = 2.0
+    slippage_k_vol: float = 0.15
+    slippage_k_quality: float = 1.0
+    slippage_floor_volume_shares: float = 2000.0
+    max_slippage_bps_swing: float = 15.0
+    max_slippage_bps_scalp: float = 5.0
+
+    # Slippage and impact realism controls (Legacy).
     low_volume_threshold_shares: float = 25_000.0
     low_volume_slippage_multiplier: float = 1.75
     impact_coeff_bps: float = 6.0
@@ -197,25 +207,46 @@ class TradingCosts:
         shares: float,
         side: str,
         avg_bar_volume: Optional[float] = None,
-    ) -> Dict[str, float]:
+        spread_bps: Optional[float] = None,
+        atr_1m_pct: Optional[float] = None,
+        l2_coverage_ratio: Optional[float] = None,
+        strategy_name: Optional[str] = None,
+        is_unrealized: bool = False,
+    ) -> Dict[str, Any]:
         """Calculate all trading costs."""
         # Estimate participation to model liquidity-dependent slippage/impact.
         avg_volume = float(avg_bar_volume or 0.0)
-        participation_ratio = shares / avg_volume if avg_volume > 0 else 0.0
+        floor_volume = max(float(self.slippage_floor_volume_shares), 1.0)
+        effective_volume = max(avg_volume, floor_volume)
+        participation_ratio = shares / effective_volume
+        
+        # Dynamic Slippage Formula (predicts one-way slippage in bps)
+        _spread = float(spread_bps) if spread_bps is not None else 2.0
+        # Convert ATR from raw percentage point to bps explicitly (e.g. 0.20 -> 20.0 bps)
+        _atr_bps = (float(atr_1m_pct) * 100.0) if atr_1m_pct is not None else 10.0
+        _l2_cov = float(l2_coverage_ratio) if l2_coverage_ratio is not None else 1.0
 
-        volume_multiplier = 1.0
-        if avg_volume > 0 and avg_volume < self.low_volume_threshold_shares:
-            shortage = (self.low_volume_threshold_shares - avg_volume) / self.low_volume_threshold_shares
-            volume_multiplier += shortage * max(0.0, self.low_volume_slippage_multiplier - 1.0)
+        comp_spread = 0.5 * _spread
+        comp_part = self.slippage_k_part * math.sqrt(participation_ratio)
+        comp_vol = self.slippage_k_vol * _atr_bps
+        comp_quality = self.slippage_k_quality * (1.0 - _l2_cov)
 
-        participation_multiplier = 1.0 + max(0.0, participation_ratio - 0.02) * 6.0
-        dynamic_slippage_per_share = self.slippage_per_share * volume_multiplier * participation_multiplier
-        slippage_cost = dynamic_slippage_per_share * shares * 2
+        raw_slip_bps = comp_spread + comp_part + comp_vol + comp_quality
+        
+        strat = str(strategy_name or "").lower()
+        cap_bps = self.max_slippage_bps_scalp if "scalp" in strat else self.max_slippage_bps_swing
+        slip_bps = min(raw_slip_bps, cap_bps)
+        
+        avg_notional = ((entry_price + exit_price) / 2.0) * shares
+        # Round-trip logic: 2x if realized (entry+exit), 1x if unrealized (only exit MTM)
+        multiplier = 1.0 if is_unrealized else 2.0
+        slippage_cost = avg_notional * ((slip_bps * multiplier) / 10000.0)
+        dynamic_slippage_per_share = slippage_cost / (shares * multiplier) if shares > 0 else 0.0
 
         # Commission per side with minimum
         entry_commission = max(self.commission_per_share * shares, self.commission_min)
         exit_commission = max(self.commission_per_share * shares, self.commission_min)
-        commission = entry_commission + exit_commission
+        commission = exit_commission if is_unrealized else (entry_commission + exit_commission)
 
         # SELL-side only fees (long -> sell on exit, short -> sell on entry)
         sell_price = exit_price if side == "long" else entry_price
@@ -240,6 +271,17 @@ class TradingCosts:
 
         total = slippage_cost + commission + reg_fee + finra_fee + sec_fee + market_impact
 
+        slippage_components = {
+            "spread_bps_half": comp_spread,
+            "participation_impact_bps": comp_part,
+            "volatility_impact_bps": comp_vol,
+            "l2_quality_impact_bps": comp_quality,
+            "raw_total_bps": raw_slip_bps,
+            "capped_total_bps": slip_bps,
+            "cap_limit_bps": cap_bps,
+            "is_unrealized": is_unrealized
+        }
+
         return {
             'slippage': slippage_cost,
             'commission': commission,
@@ -250,6 +292,7 @@ class TradingCosts:
             'dynamic_slippage_per_share': dynamic_slippage_per_share,
             'participation_ratio': participation_ratio,
             'total': total,
+            'slippage_components': slippage_components,
         }
 
 
@@ -350,6 +393,8 @@ class TradingSession:
     break_even_trailing_handoff_formula: str = ""
     trailing_enabled_in_choppy: bool = False  # Disable trailing in CHOPPY regime
     choppy_time_exit_bars: int = 12         # Shorter time-stop in CHOPPY regime
+    stale_trade_be_bars: int = 0            # 0=disabled; force BE after N bars if low P&L
+    stale_trade_be_pnl_threshold_pct: float = 0.15  # Max unrealized % to trigger stale BE
 
     # Session results
     start_price: Optional[float] = None
@@ -468,6 +513,9 @@ class TradingSession:
         self.break_even_trailing_handoff_formula = config.break_even_trailing_handoff_formula
         self.trailing_enabled_in_choppy = config.trailing_enabled_in_choppy
         self.time_exit_bars = config.time_exit_bars
+        self.choppy_time_exit_bars = config.choppy_time_exit_bars
+        self.stale_trade_be_bars = config.stale_trade_be_bars
+        self.stale_trade_be_pnl_threshold_pct = config.stale_trade_be_pnl_threshold_pct
         self.time_exit_formula_enabled = config.time_exit_formula_enabled
         self.time_exit_formula = config.time_exit_formula
         self.adverse_flow_exit_enabled = config.adverse_flow_exit_enabled

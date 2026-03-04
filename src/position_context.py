@@ -86,7 +86,7 @@ class ContextChangeEvent:
 
 # Strategy categories for determining severity of regime flips
 _MOMENTUM_STRATEGIES = {"momentum", "momentum_flow", "pullback", "gap_liquidity"}
-_MEAN_REVERSION_STRATEGIES = {"mean_reversion", "absorption_reversal", "exhaustion_fade"}
+_MEAN_REVERSION_STRATEGIES = {"mean_reversion", "absorption_reversal", "exhaustion_fade", "level_fade"}
 
 
 def _classify_regime_flip_severity(

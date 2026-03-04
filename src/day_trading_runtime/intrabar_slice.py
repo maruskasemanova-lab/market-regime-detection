@@ -186,7 +186,7 @@ def runtime_evaluate_intrabar_slice(
                 effective_trade_threshold = max(0.0, effective_trade_threshold - _tod_relief2)
                 tod_boost = _strategy_tod2
                 threshold_used_reason = f"{threshold_used_reason}-midday_relief({_tod_relief2:.0f})"
-        _headwind_contrarian2 = {"mean_reversion", "absorption_reversal", "rotation"}
+        _headwind_contrarian2 = {"mean_reversion", "absorption_reversal", "rotation", "level_fade"}
         if headwind_boost > 2.0 and _sig_strat2 in _headwind_contrarian2:
             _hw_relief2 = headwind_boost - 2.0
             headwind_boost = 2.0

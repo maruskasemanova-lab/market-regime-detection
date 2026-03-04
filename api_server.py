@@ -155,6 +155,20 @@ def _apply_cors_headers_for_error(request: Request, response: JSONResponse) -> J
     return response
 
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+@app.middleware("http")
+async def catch_exceptions_middleware(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as e:
+        import traceback
+        print(f"!!! FATAL CRASH ON ENDPOINT {request.url.path} !!!")
+        traceback.print_exc()
+        import sys; sys.stdout.flush(); sys.stderr.flush()
+        return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
 @app.middleware("http")
 async def _internal_api_token_guard(request: Request, call_next):
     if not _INTERNAL_API_TOKEN:
@@ -471,7 +485,8 @@ async def evaluate_intrabar_slice(bar: BarInput):
         bar_data=bar_data,
     )
 
-    return sanitize_non_finite_numbers(result)
+    from fastapi.encoders import jsonable_encoder
+    return sanitize_non_finite_numbers(jsonable_encoder(result))
 
 
 @app.post("/api/session/bar")
@@ -493,7 +508,8 @@ async def process_bar(bar: BarInput):
             "DEBUG: api_server received TCBBO data: "
             f"has_data={bar.tcbbo_has_data}, net_premium={bar.tcbbo_net_premium}"
         )
-    return _process_session_bar_payload(bar)
+    from fastapi.encoders import jsonable_encoder
+    return sanitize_non_finite_numbers(jsonable_encoder(_process_session_bar_payload(bar)))
 
 
 @app.post("/api/session/bars")
@@ -546,50 +562,52 @@ async def process_bars(request: Request):
             )
         results.append(_process_session_bar_payload(row))
 
-    return {
+    from fastapi.encoders import jsonable_encoder
+    encoded = jsonable_encoder({
         "results": results,
         "bars_processed": len(results),
-    }
+    })
+    return sanitize_non_finite_numbers(encoded)
 
 
 @app.get("/api/session")
 async def get_session(run_id: str, ticker: str, date: str):
     """Get current session state."""
     session = day_trading_manager.get_session(run_id, ticker, date)
-    
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    return session.to_dict()
+    from fastapi.encoders import jsonable_encoder
+    return sanitize_non_finite_numbers(jsonable_encoder(session.to_dict()))
 
 
 @app.get("/api/session/signals")
 async def get_session_signals(run_id: str, ticker: str, date: str):
     """Get signals for a session."""
     session = day_trading_manager.get_session(run_id, ticker, date)
-    
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    return {
+    from fastapi.encoders import jsonable_encoder
+    return sanitize_non_finite_numbers(jsonable_encoder({
         "signals": [s.to_dict() for s in session.signals],
         "count": len(session.signals)
-    }
+    }))
 
 
 @app.get("/api/session/trades")
 async def get_session_trades(run_id: str, ticker: str, date: str):
     """Get trades for a session."""
     session = day_trading_manager.get_session(run_id, ticker, date)
-    
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    return {
+    from fastapi.encoders import jsonable_encoder
+    return sanitize_non_finite_numbers(jsonable_encoder({
         "trades": [t.to_dict() for t in session.trades],
         "count": len(session.trades),
         "total_pnl": session.total_pnl
-    }
+    }))
 
 
 @app.post("/api/session/end")
@@ -867,13 +885,15 @@ async def configure_session(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        return apply_session_config_resolution(
+        from fastapi.encoders import jsonable_encoder
+        res = apply_session_config_resolution(
             manager=day_trading_manager,
             session=session,
             run_id=run_id,
             ticker=ticker,
             resolution=resolution,
         )
+        return sanitize_non_finite_numbers(jsonable_encoder(res))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

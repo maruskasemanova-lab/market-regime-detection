@@ -94,12 +94,45 @@ def build_day_trading_bar_payload_from_mapping(
 
 def sanitize_non_finite_numbers(value: Any) -> Any:
     """Recursively replace NaN/Inf with None for JSON serialization safety."""
-    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
-        return None
+    import math
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if type(value).__name__ in ('float32', 'float64', 'float16'):
+        import numpy as np
+        if np.isnan(value) or np.isinf(value):
+            return None
+        return float(value)
     if isinstance(value, dict):
-        return {key: sanitize_non_finite_numbers(item) for key, item in value.items()}
+        sanitized_dict = {}
+        for key, item in value.items():
+            safe_k = sanitize_non_finite_numbers(key)
+            if safe_k is None:
+                if isinstance(key, float):
+                    import math
+                    if math.isnan(key):
+                        safe_k = "NaN"
+                    elif key > 0:
+                        safe_k = "Infinity"
+                    else:
+                        safe_k = "-Infinity"
+                elif type(key).__name__ in ('float32', 'float64', 'float16'):
+                    import numpy as np
+                    if np.isnan(key):
+                        safe_k = "NaN"
+                    elif key > 0:
+                        safe_k = "Infinity"
+                    else:
+                        safe_k = "-Infinity"
+                else:
+                    safe_k = "NaN"
+            sanitized_dict[safe_k] = sanitize_non_finite_numbers(item)
+        return sanitized_dict
     if isinstance(value, (list, tuple)):
         return [sanitize_non_finite_numbers(item) for item in value]
+    if hasattr(value, "to_dict") and callable(getattr(value, "to_dict")):
+        return sanitize_non_finite_numbers(value.to_dict())
     return value
 
 

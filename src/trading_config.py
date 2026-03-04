@@ -69,6 +69,9 @@ class TradingConfig:
     break_even_trailing_handoff_formula: str = ""
     trailing_enabled_in_choppy: bool = False
     time_exit_bars: int = 40
+    choppy_time_exit_bars: int = 12
+    stale_trade_be_bars: int = 0
+    stale_trade_be_pnl_threshold_pct: float = 0.15
     time_exit_formula_enabled: bool = False
     time_exit_formula: str = ""
     adverse_flow_exit_enabled: bool = True

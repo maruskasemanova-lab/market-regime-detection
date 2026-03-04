@@ -67,3 +67,28 @@ def test_sanitize_non_finite_numbers_recursive():
     }
     sanitized = sanitize_non_finite_numbers(payload)
     assert sanitized == {"a": None, "b": [1.0, None, {"c": None}]}
+
+
+def test_sanitize_non_finite_numbers_with_nan_keys():
+    import math
+    payload = {
+        float("nan"): "value_for_nan",
+        float("inf"): "value_for_inf",
+        float("-inf"): "value_for_neg_inf",
+        "nested": {
+            float("nan"): 123
+        }
+    }
+    sanitized = sanitize_non_finite_numbers(payload)
+    
+    # Check that keys are properly stringified for non-finite floats
+    assert "NaN" in sanitized
+    assert sanitized["NaN"] == "value_for_nan"
+    assert "Infinity" in sanitized
+    assert sanitized["Infinity"] == "value_for_inf"
+    assert "-Infinity" in sanitized
+    assert sanitized["-Infinity"] == "value_for_neg_inf"
+    
+    assert "nested" in sanitized
+    assert "NaN" in sanitized["nested"]
+    assert sanitized["nested"]["NaN"] == 123

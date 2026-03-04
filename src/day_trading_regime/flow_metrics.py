@@ -118,6 +118,29 @@ def _calculate_window_flow_components(self, window: List[BarData]) -> Dict[str, 
     )
     price_trend_efficiency = self._safe_div(abs(last_close - first_close), total_price_move, 0.0)
 
+    # ── Estimate bar interval for adaptive absorption threshold ──────
+    # The "low progress" threshold determines which bars count as
+    # absorbed (volume present but price barely moved).  The original
+    # 0.02 % (2 bps) is correct for 1-minute bars but too tight for
+    # 5-second bars where even quiet bars typically move >0.05%.
+    _bar_interval_secs = 60.0  # default to 1-minute assumption
+    if len(window) >= 2:
+        try:
+            _dt0 = window[0].timestamp
+            _dt1 = window[-1].timestamp
+            _span = (_dt1 - _dt0).total_seconds()
+            if _span > 0 and (len(window) - 1) > 0:
+                _bar_interval_secs = max(1.0, _span / (len(window) - 1))
+        except Exception:
+            pass
+
+    if _bar_interval_secs <= 10:
+        _low_progress_threshold_pct = 0.06   # 5–10s bars
+    elif _bar_interval_secs <= 30:
+        _low_progress_threshold_pct = 0.04   # 15–30s bars
+    else:
+        _low_progress_threshold_pct = 0.02   # 1-min+ bars (original)
+
     directional_base = 0
     directional_hits = 0
     low_progress_l2_volume = 0.0
@@ -131,7 +154,7 @@ def _calculate_window_flow_components(self, window: List[BarData]) -> Dict[str, 
             directional_base += 1
             if (delta_val * price_change) > 0:
                 directional_hits += 1
-        if abs(price_change) <= 0.02:
+        if abs(price_change) <= _low_progress_threshold_pct:
             low_progress_l2_volume += l2_volumes[i]
 
     directional_consistency = self._safe_div(float(directional_hits), float(directional_base), 0.0)

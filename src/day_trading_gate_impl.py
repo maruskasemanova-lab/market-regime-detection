@@ -528,7 +528,7 @@ class GateEvaluationEngine:
         return metrics
 
     _TCBBO_CONTRARIAN_STRATEGIES = frozenset({
-        "mean_reversion", "absorption_reversal", "rotation",
+        "mean_reversion", "absorption_reversal", "rotation", "level_fade",
     })
 
     def passes_tcbbo_confirmation(

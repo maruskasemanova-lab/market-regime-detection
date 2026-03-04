@@ -20,6 +20,7 @@ from .strategies.iceberg_defense import IcebergDefenseStrategy
 from .strategies.scalp_l2_intrabar import ScalpL2IntrabarStrategy
 from .strategies.evidence_scalp import EvidenceScalpStrategy
 from .strategies.options_flow_alpha import OptionsFlowAlphaStrategy
+from .strategies.level_fade import LevelFadeStrategy
 
 
 def build_strategy_registry() -> Dict[str, BaseStrategy]:
@@ -39,4 +40,5 @@ def build_strategy_registry() -> Dict[str, BaseStrategy]:
         "scalp_l2_intrabar": ScalpL2IntrabarStrategy(),
         "evidence_scalp": EvidenceScalpStrategy(),
         "options_flow_alpha": OptionsFlowAlphaStrategy(),
+        "level_fade": LevelFadeStrategy(),
     }

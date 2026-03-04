@@ -149,7 +149,7 @@ def process_pending_signal_entry(
         _pending_strategy = str(
             getattr(signal, "strategy_name", "") or ""
         ).strip().lower()
-        _MR_BOUNCE_STRATS = {"mean_reversion", "absorption_reversal", "rotation"}
+        _MR_BOUNCE_STRATS = {"mean_reversion", "absorption_reversal", "rotation", "level_fade"}
         if micro_mode == "consecutive_close" and _pending_strategy in _MR_BOUNCE_STRATS:
             micro_mode = "volume_delta"
         micro_confirmation = micro_confirmation_snapshot(

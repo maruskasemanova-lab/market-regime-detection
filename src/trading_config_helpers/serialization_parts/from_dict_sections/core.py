@@ -354,6 +354,18 @@ def build_core_kwargs(
             1,
             cls._to_int(raw.get("time_exit_bars"), defaults.time_exit_bars),
         ),
+        choppy_time_exit_bars=max(
+            1,
+            cls._to_int(raw.get("choppy_time_exit_bars"), defaults.choppy_time_exit_bars),
+        ),
+        stale_trade_be_bars=max(
+            0,
+            cls._to_int(raw.get("stale_trade_be_bars"), defaults.stale_trade_be_bars),
+        ),
+        stale_trade_be_pnl_threshold_pct=max(
+            0.0,
+            cls._to_float(raw.get("stale_trade_be_pnl_threshold_pct"), defaults.stale_trade_be_pnl_threshold_pct),
+        ),
         time_exit_formula_enabled=cls._to_bool(
             runtime_formula_fields.get(
                 "time_exit_formula_enabled",

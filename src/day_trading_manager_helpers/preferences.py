@@ -55,6 +55,7 @@ def default_regime_preferences() -> Dict[Regime, List[str]]:
         Regime.CHOPPY: [
             "absorption_reversal",
             "exhaustion_fade",
+            "level_fade",
             "mean_reversion",
             "vwap_magnet",
             "scalp_l2_intrabar",
@@ -65,6 +66,7 @@ def default_regime_preferences() -> Dict[Regime, List[str]]:
         Regime.MIXED: [
             "exhaustion_fade",
             "absorption_reversal",
+            "level_fade",
             "volume_profile",
             "gap_liquidity",
             "scalp_l2_intrabar",
@@ -99,6 +101,7 @@ def default_micro_regime_preferences() -> Dict[str, List[str]]:
         "CHOPPY": [
             "absorption_reversal",
             "exhaustion_fade",
+            "level_fade",
             "mean_reversion",
             "vwap_magnet",
             "evidence_scalp",
@@ -106,6 +109,7 @@ def default_micro_regime_preferences() -> Dict[str, List[str]]:
         "ABSORPTION": [
             "absorption_reversal",
             "exhaustion_fade",
+            "level_fade",
             "vwap_magnet",
             "evidence_scalp",
         ],

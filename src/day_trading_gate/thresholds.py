@@ -102,7 +102,7 @@ def cross_asset_headwind_threshold_boost(
     boost = boost_floor + normalized * (boost_ceiling - boost_floor)
 
     _sk = str(strategy_key or "").strip().lower()
-    _contrarian = {"mean_reversion", "absorption_reversal", "rotation"}
+    _contrarian = {"mean_reversion", "absorption_reversal", "rotation", "level_fade"}
     if _sk in _contrarian:
         boost = min(boost, 2.0)
         metrics["contrarian_headwind_cap"] = True

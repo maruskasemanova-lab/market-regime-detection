@@ -58,6 +58,7 @@ def runtime_generate_signal(
         "scalp_l2_intrabar",
         "evidence_scalp",
         "options_flow_alpha",
+        "level_fade",
     }
 
     for strategy_name in active_strategies:

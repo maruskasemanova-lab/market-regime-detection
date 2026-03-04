@@ -23,6 +23,7 @@ from .exit_policy.break_even import update_trailing_from_close as _update_traili
 from .exit_policy.context_policy import ContextAwareExitPolicy, DEFAULT_CONTEXT_EXIT_CONFIG
 from .exit_policy.payloads import build_position_closed_payload as _build_position_closed_payload
 from .exit_policy.shared import bars_held as _bars_held
+from .exit_policy.shared import is_dead_zone_window as _is_dead_zone_window
 from .exit_policy.shared import is_midday_window as _is_midday_window
 from .exit_policy.shared import safe_intrabar_quote as _safe_intrabar_quote
 from .exit_policy.types import ExitContext, ExitDecision
@@ -713,9 +714,11 @@ class ExitPolicyEngine:
     def time_of_day_threshold_boost(bar_time: time, strategy_key: str = "") -> float:
         """Return extra threshold points for low-conviction time-of-day windows.
 
-        MR/rotation thrive during quiet midday ranges so the penalty is
-        reduced to +3 instead of the default +7.
+        Dead zone (ET 11:00-12:00): +12 for all strategies (0% WR observed).
+        Midday (ET 10:30-14:00): +3 for MR/rotation, +7 for others.
         """
+        if _is_dead_zone_window(bar_time):
+            return 12.0
         if _is_midday_window(bar_time):
             _MIDDAY_RELAXED = {"mean_reversion", "rotation", "vwap_magnet", "volumeprofile"}
             if str(strategy_key or "").strip().lower() in _MIDDAY_RELAXED:

@@ -337,12 +337,29 @@ class TradeExecutionEngine:
 
         gross_pnl_dollars = gross_pnl_pct * pos.entry_price / 100 * shares
 
+        # Prepare dynamic slippage inputs
+        from .day_trading_runtime_intrabar import calculate_intrabar_1s_snapshot
+        intrabar_metrics = calculate_intrabar_1s_snapshot(session.bars[-1] if session.bars else None)
+        spread_bps = float(intrabar_metrics.get("spread_bps_avg", 2.0) or 2.0)
+        
+        flow_metrics = self.manager._calculate_order_flow_metrics(session.bars, lookback=3)
+        l2_coverage_ratio = float(flow_metrics.get("l2_quality_coverage_ratio", 1.0) or 1.0)
+        
+        indicators = self.manager._calculate_indicators(session.bars[-20:] if len(session.bars) >= 20 else session.bars, session=session)
+        atr = float(self.manager._latest_indicator_value(indicators, "atr") or 0.0)
+        atr_1m_pct = (atr / exit_price) * 100.0 if exit_price > 0 else 0.1
+
         costs = self.manager.trading_costs.calculate_costs(
             entry_price=pos.entry_price,
             exit_price=exit_price,
             shares=shares,
             side=pos.side,
             avg_bar_volume=bar_volume,
+            spread_bps=spread_bps,
+            atr_1m_pct=atr_1m_pct,
+            l2_coverage_ratio=l2_coverage_ratio,
+            strategy_name=pos.strategy_name,
+            is_unrealized=False,
         )
 
         net_pnl_dollars = gross_pnl_dollars - costs['total']
@@ -413,6 +430,9 @@ class TradeExecutionEngine:
         l2_md = signal_metadata.get("l2_confirmation") if isinstance(signal_metadata, dict) else None
         if isinstance(l2_md, dict):
             flow_snapshot["l2_confirmation_passed"] = bool(l2_md.get("passed", False))
+
+        if "slippage_components" in costs:
+            flow_snapshot["slippage_components"] = costs["slippage_components"]
 
         trade = DayTrade(
             id=session.trade_counter,

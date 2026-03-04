@@ -249,6 +249,25 @@ def evaluate_break_even_activation_context(
     )
     activation_eligible = bool(activation_formula.get("passed", activation_formula_default))
 
+    # ── Stale-trade breakeven override ──
+    # If a trade has been held too long with minimal P&L, force BE activation
+    # regardless of MFE/proof gates.  stale_trade_be_bars=0 disables.
+    stale_trade_be_bars = max(0, cfg_int(session, "stale_trade_be_bars", 0))
+    stale_trade_be_triggered = False
+    if (
+        stale_trade_be_bars > 0
+        and bars_held_count >= stale_trade_be_bars
+        and not bool(getattr(pos, "break_even_stop_active", False))
+    ):
+        stale_pnl_thr = cfg_float(session, "stale_trade_be_pnl_threshold_pct", 0.15)
+        if side == "long":
+            unrealized_pct = ((bar_close - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0
+        else:
+            unrealized_pct = ((entry_price - bar_close) / entry_price * 100.0) if entry_price > 0 else 0.0
+        if unrealized_pct < stale_pnl_thr:
+            activation_eligible = True
+            stale_trade_be_triggered = True
+
     if movement_passed:
         pos.trailing_activation_pnl_met = True
 
@@ -289,6 +308,7 @@ def evaluate_break_even_activation_context(
         "strategy": strategy_key,
         "pullback_strategy": pullback_strategy,
         "pullback_proof_required": pullback_proof_required,
+        "stale_trade_be_triggered": stale_trade_be_triggered,
     }
 
 
