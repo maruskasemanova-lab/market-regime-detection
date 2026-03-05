@@ -200,6 +200,10 @@ class TradingCosts:
     sec_fee_per_dollar: float = 0.0   # SELL-side notional, default 0
     reg_fee_per_share: float = 0.0    # optional pass-through, SELL side only
 
+    # Optional: override ALL dynamic cost logic with a single fixed roundtrip dollar amount.
+    # If set, commission, slippage, fees are all zeroed and total = flat_roundtrip_cost.
+    flat_roundtrip_cost: Optional[float] = None
+
     def calculate_costs(
         self,
         entry_price: float,
@@ -214,6 +218,31 @@ class TradingCosts:
         is_unrealized: bool = False,
     ) -> Dict[str, Any]:
         """Calculate all trading costs."""
+
+        # ── Flat-cost override ─────────────────────────────────────────────
+        # When flat_roundtrip_cost is set, skip all dynamic modelling and use
+        # a single fixed dollar amount per round-trip (halved for unrealized MTM).
+        if self.flat_roundtrip_cost is not None:
+            flat = float(self.flat_roundtrip_cost)
+            total = flat * 0.5 if is_unrealized else flat
+            return {
+                'slippage': total,
+                'commission': 0.0,
+                'reg_fee': 0.0,
+                'sec_fee': 0.0,
+                'finra_fee': 0.0,
+                'market_impact': 0.0,
+                'dynamic_slippage_per_share': total / max(shares, 1e-6),
+                'participation_ratio': 0.0,
+                'total': total,
+                'slippage_components': {
+                    'flat_roundtrip_cost': flat,
+                    'is_unrealized': is_unrealized,
+                },
+            }
+
+        # ── Dynamic cost model ─────────────────────────────────────────────
+
         # Estimate participation to model liquidity-dependent slippage/impact.
         avg_volume = float(avg_bar_volume or 0.0)
         floor_volume = max(float(self.slippage_floor_volume_shares), 1.0)

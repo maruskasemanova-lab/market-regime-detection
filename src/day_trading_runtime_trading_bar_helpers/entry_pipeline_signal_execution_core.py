@@ -32,13 +32,16 @@ def _execute_or_reject_decision_signal(
     decision = decision_state["decision"]
     effective_trade_threshold = float(decision_state["effective_trade_threshold"])
     passed_trade_threshold = bool(decision_state["passed_trade_threshold"])
+    if bool(getattr(getattr(session, "config", None), "bypass_all_entry_gates", False)):
+        passed_trade_threshold = True
     tod_boost = float(decision_state["tod_boost"])
     headwind_boost = float(decision_state["headwind_boost"])
     headwind_metrics = decision_state["headwind_metrics"]
     required_confirming_sources = int(decision_state["required_confirming_sources"])
     threshold_used_reason = str(decision_state["threshold_used_reason"])
 
-    if decision.execute and decision.signal and passed_trade_threshold:
+    _bypass = bool(getattr(getattr(session, "config", None), "bypass_all_entry_gates", False))
+    if (decision.execute or _bypass) and decision.signal and passed_trade_threshold:
         return _execute_confirmed_decision_signal(
             self,
             session=session,

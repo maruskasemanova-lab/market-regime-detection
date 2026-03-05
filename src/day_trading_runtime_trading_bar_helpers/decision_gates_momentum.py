@@ -71,6 +71,10 @@ def _apply_momentum_diversification_gate(
 ) -> tuple[bool, Dict[str, Any]]:
     """Apply momentum diversification gate."""
 
+    config = getattr(session, "config", None)
+    if not bool(getattr(config, "momentum_diversification_gate_enabled", True)):
+        return False, {"enabled": False, "passed": True, "applicable": False, "gate_bypassed": True}
+
     momentum_diversification_passed, momentum_diversification_metrics = (
         self.gate_engine.passes_momentum_diversification_gate(
             session=session,

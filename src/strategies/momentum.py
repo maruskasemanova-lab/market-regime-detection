@@ -173,10 +173,23 @@ class MomentumStrategy(BaseStrategy):
                 reasoning_parts.append("Strong breakout candle")
             
             if confidence >= self.min_confidence:
-                stop_pct = self.volume_adjusted_pct(effective_volume_stop_pct, volume_ratio)
-                stop_loss = max(consol_low, current_price * (1 - stop_pct / 100))
-                take_profit = self.calculate_take_profit(current_price, stop_loss, effective_rr_ratio, 'long')
+                # Structural Targets
+                targets = self.resolve_structural_targets(
+                    current_price=current_price,
+                    side="long",
+                    indicators=indicators,
+                    fallback_atr_multiplier=2.0,
+                    fallback_rr_ratio=effective_rr_ratio,
+                )
                 
+                # Check if the generated stop is inside the flag; if so, push it to the other side of the flag.
+                stop_loss = targets["stop_loss"]
+                if stop_loss > consol_low:
+                     stop_loss = min(stop_loss, consol_low - 0.01) # push below the consolidation
+                     targets["sl_reason"] = "momentum_flag_floor"
+                     
+                take_profit = targets["take_profit"]
+
                 signal = Signal(
                     strategy_name=self.name,
                     signal_type=SignalType.BUY,
@@ -195,7 +208,10 @@ class MomentumStrategy(BaseStrategy):
                         'volume_ratio': volume_ratio,
                         'rsi': rsi_val,
                         'regime': regime.value,
-                        'adx': adx_val
+                        'adx': adx_val,
+                        'tp_reason': targets["tp_reason"],
+                        'sl_reason': targets["sl_reason"],
+                        'stop_type': targets["stop_type"]
                     }
                 )
         
@@ -244,10 +260,23 @@ class MomentumStrategy(BaseStrategy):
                 reasoning_parts.append("Strong breakdown candle")
             
             if confidence >= self.min_confidence:
-                stop_pct = self.volume_adjusted_pct(effective_volume_stop_pct, volume_ratio)
-                stop_loss = min(consol_high, current_price * (1 + stop_pct / 100))
-                take_profit = self.calculate_take_profit(current_price, stop_loss, effective_rr_ratio, 'short')
+                # Structural Targets
+                targets = self.resolve_structural_targets(
+                    current_price=current_price,
+                    side="short",
+                    indicators=indicators,
+                    fallback_atr_multiplier=2.0,
+                    fallback_rr_ratio=effective_rr_ratio,
+                )
                 
+                # Check if the generated stop is inside the flag; if so, push it to the other side of the flag.
+                stop_loss = targets["stop_loss"]
+                if stop_loss < consol_high:
+                     stop_loss = max(stop_loss, consol_high + 0.01) # push above the consolidation
+                     targets["sl_reason"] = "momentum_flag_ceiling"
+                     
+                take_profit = targets["take_profit"]
+
                 signal = Signal(
                     strategy_name=self.name,
                     signal_type=SignalType.SELL,
@@ -266,7 +295,10 @@ class MomentumStrategy(BaseStrategy):
                         'volume_ratio': volume_ratio,
                         'rsi': rsi_val,
                         'regime': regime.value,
-                        'adx': adx_val
+                        'adx': adx_val,
+                        'tp_reason': targets["tp_reason"],
+                        'sl_reason': targets["sl_reason"],
+                        'stop_type': targets["stop_type"]
                     }
                 )
         

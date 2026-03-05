@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any, Dict
 
 from ..day_trading_models import BarData, TradingSession
@@ -30,6 +31,65 @@ def _decision_direction(decision: Any) -> str:
     if signal_type == SignalType.SELL:
         return "bearish"
     return ""
+
+
+_MARGIN_REASON_RE = re.compile(
+    r"margin\s+(-?\d+(?:\.\d+)?)\s*<\s*required\s+(-?\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def _threshold_rejection_context(
+    *,
+    decision: Any,
+    effective_trade_threshold: float,
+    passed_trade_threshold: bool,
+) -> Dict[str, Any]:
+    """Compute explicit rejection subtype + margin diagnostics."""
+    combined_score = float(getattr(decision, "combined_score", 0.0) or 0.0)
+    model_threshold = float(getattr(decision, "threshold", 0.0) or 0.0)
+    score_minus_model_threshold = combined_score - model_threshold
+    score_minus_trade_threshold = combined_score - float(effective_trade_threshold)
+    required_margin = None
+
+    try:
+        explicit_required = getattr(decision, "required_margin", None)
+        if explicit_required is not None:
+            required_margin = float(explicit_required)
+    except (TypeError, ValueError):
+        required_margin = None
+
+    reasoning = str(getattr(decision, "reasoning", "") or "")
+    match = _MARGIN_REASON_RE.search(reasoning)
+    if match:
+        try:
+            score_minus_model_threshold = float(match.group(1))
+            required_margin = float(match.group(2))
+        except (TypeError, ValueError):
+            pass
+
+    passes_margin_gate = None
+    if required_margin is not None:
+        passes_margin_gate = score_minus_model_threshold >= required_margin
+
+    if bool(getattr(decision, "execute", False)) and not passed_trade_threshold:
+        rejection_subtype = "headwind_or_trade_threshold"
+    elif score_minus_trade_threshold < 0:
+        rejection_subtype = "score_below_trade_threshold"
+    elif passes_margin_gate is False:
+        rejection_subtype = "margin_insufficient"
+    else:
+        rejection_subtype = "ensemble_execute_false"
+
+    return {
+        "score_minus_trade_threshold": round(float(score_minus_trade_threshold), 4),
+        "score_minus_model_threshold": round(float(score_minus_model_threshold), 4),
+        "required_margin": (
+            round(float(required_margin), 4) if required_margin is not None else None
+        ),
+        "passes_margin_gate": passes_margin_gate,
+        "rejection_subtype": rejection_subtype,
+    }
 
 
 def runtime_evaluate_intrabar_slice(
@@ -171,6 +231,8 @@ def runtime_evaluate_intrabar_slice(
         threshold_used_reason = f"{threshold_used_reason}-golden({golden_setup_relief:.1f})"
 
     passed_trade_threshold = float(decision.combined_score) >= effective_trade_threshold
+    if bool(getattr(getattr(session, "config", None), "bypass_all_entry_gates", False)):
+        passed_trade_threshold = True
 
     # Strategy-aware threshold corrections (second code path)
     if decision.signal:
@@ -193,6 +255,8 @@ def runtime_evaluate_intrabar_slice(
             effective_trade_threshold = max(0.0, effective_trade_threshold - _hw_relief2)
             threshold_used_reason = f"{threshold_used_reason}-hw_relief({_hw_relief2:.1f})"
         passed_trade_threshold = float(decision.combined_score) >= effective_trade_threshold
+        if bool(getattr(getattr(session, "config", None), "bypass_all_entry_gates", False)):
+            passed_trade_threshold = True
 
     combined_raw = float(getattr(decision, "combined_raw", decision.combined_score) or 0.0)
     combined_norm = getattr(decision, "combined_norm_0_100", None)
@@ -232,6 +296,14 @@ def runtime_evaluate_intrabar_slice(
         "required_confirming_sources": required_confirming_sources,
         "engine": "evidence_v1",
     }
+    layer_scores["score_minus_trade_threshold"] = round(
+        float(decision.combined_score) - float(effective_trade_threshold),
+        4,
+    )
+    layer_scores["score_minus_model_threshold"] = round(
+        float(decision.combined_score) - float(getattr(decision, "threshold", 0.0)),
+        4,
+    )
 
     result = {
         "timestamp": timestamp.isoformat(),
@@ -258,6 +330,11 @@ def runtime_evaluate_intrabar_slice(
             result["candidate_diagnostics"] = cand_diag
 
     if decision.combined_score > 0 and (not decision.execute or not passed_trade_threshold):
+        rejection_context = _threshold_rejection_context(
+            decision=decision,
+            effective_trade_threshold=effective_trade_threshold,
+            passed_trade_threshold=passed_trade_threshold,
+        )
         result["signal_rejected"] = {
             "gate": "cross_asset_headwind" if (decision.execute and not passed_trade_threshold) else "threshold",
             "schema_version": 2,
@@ -275,6 +352,7 @@ def runtime_evaluate_intrabar_slice(
             "headwind_threshold_boost": round(float(headwind_boost), 4),
             "cross_asset_headwind": headwind_metrics,
             "timestamp": timestamp.isoformat(),
+            **rejection_context,
         }
 
     if "candidate_diagnostics" not in result and hasattr(decision, "confirming_signals") and decision.confirming_signals:

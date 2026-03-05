@@ -88,12 +88,15 @@ export function useBackendApi() {
     }
   }, []);
 
-  const stepBacktest = useCallback(async () => {
+  const stepBacktest = useCallback(async (options = {}) => {
+    const { refreshState = true } = options;
     try {
       const response = await fetch(`${API_URL}/api/step`, { method: "POST" });
       if (!response.ok) throw new Error("Failed to step");
       const result = await response.json();
-      await fetchState();
+      if (refreshState) {
+        await fetchState();
+      }
       return result;
     } catch (err) {
       console.error("Step error:", err);
@@ -102,14 +105,17 @@ export function useBackendApi() {
   }, [fetchState]);
 
   const runBacktest = useCallback(
-    async (bars = 10) => {
+    async (bars = 10, options = {}) => {
+      const { refreshState = true } = options;
       try {
         const response = await fetch(`${API_URL}/api/run?bars=${bars}`, {
           method: "POST",
         });
         if (!response.ok) throw new Error("Failed to run");
         const result = await response.json();
-        await fetchState();
+        if (refreshState) {
+          await fetchState();
+        }
         return result;
       } catch (err) {
         console.error("Run error:", err);
@@ -119,12 +125,15 @@ export function useBackendApi() {
     [fetchState],
   );
 
-  const resetEngine = useCallback(async () => {
+  const resetEngine = useCallback(async (options = {}) => {
+    const { refreshState = true } = options;
     try {
       const response = await fetch(`${API_URL}/api/reset`, { method: "POST" });
       if (!response.ok) throw new Error("Failed to reset");
       const result = await response.json();
-      await fetchState();
+      if (refreshState) {
+        await fetchState();
+      }
       return result;
     } catch (err) {
       console.error("Reset error:", err);
@@ -133,7 +142,8 @@ export function useBackendApi() {
   }, [fetchState]);
 
   const toggleStrategy = useCallback(
-    async (strategyName, enabled) => {
+    async (strategyName, enabled, options = {}) => {
+      const { refreshState = true } = options;
       try {
         const response = await fetch(`${API_URL}/api/strategies/toggle`, {
           method: "POST",
@@ -141,7 +151,9 @@ export function useBackendApi() {
           body: JSON.stringify({ strategy_name: strategyName, enabled }),
         });
         if (!response.ok) throw new Error("Failed to toggle strategy");
-        await fetchState();
+        if (refreshState) {
+          await fetchState();
+        }
         return await response.json();
       } catch (err) {
         console.error("Toggle error:", err);
@@ -152,7 +164,8 @@ export function useBackendApi() {
   );
 
   const updateStrategy = useCallback(
-    async (strategyName, params) => {
+    async (strategyName, params, options = {}) => {
+      const { refreshState = true } = options;
       try {
         const response = await fetch(`${API_URL}/api/strategies/update`, {
           method: "POST",
@@ -160,7 +173,9 @@ export function useBackendApi() {
           body: JSON.stringify({ strategy_name: strategyName, params }),
         });
         if (!response.ok) throw new Error("Failed to update strategy");
-        await fetchState();
+        if (refreshState) {
+          await fetchState();
+        }
         return await response.json();
       } catch (err) {
         console.error("Update strategy error:", err);

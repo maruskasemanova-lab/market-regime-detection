@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import logging
+import re
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
@@ -18,6 +19,65 @@ from ..day_trading_runtime_sweep import (
 from ..strategies.base_strategy import Regime, Signal
 
 logger = logging.getLogger(__name__)
+
+_MARGIN_REASON_RE = re.compile(
+    r"margin\s+(-?\d+(?:\.\d+)?)\s*<\s*required\s+(-?\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def _extract_threshold_rejection_context(
+    *,
+    decision: SimpleNamespace,
+    effective_trade_threshold: float,
+    passed_trade_threshold: bool,
+) -> Dict[str, Any]:
+    """Compute precise threshold rejection diagnostics for UI/debug payloads."""
+    combined_score = float(getattr(decision, "combined_score", 0.0) or 0.0)
+    model_threshold = float(getattr(decision, "threshold", 0.0) or 0.0)
+    score_minus_model_threshold = combined_score - model_threshold
+    score_minus_trade_threshold = combined_score - float(effective_trade_threshold)
+    required_margin = None
+
+    explicit_required = getattr(decision, "required_margin", None)
+    try:
+        if explicit_required is not None:
+            required_margin = float(explicit_required)
+    except (TypeError, ValueError):
+        required_margin = None
+
+    reasoning = str(getattr(decision, "reasoning", "") or "")
+    match = _MARGIN_REASON_RE.search(reasoning)
+    if match:
+        try:
+            score_minus_model_threshold = float(match.group(1))
+            required_margin = float(match.group(2))
+        except (TypeError, ValueError):
+            pass
+
+    passes_margin_gate = None
+    if required_margin is not None:
+        passes_margin_gate = score_minus_model_threshold >= required_margin
+
+    if bool(getattr(decision, "execute", False)) and not passed_trade_threshold:
+        rejection_subtype = "headwind_or_trade_threshold"
+    elif score_minus_trade_threshold < 0:
+        rejection_subtype = "score_below_trade_threshold"
+    elif passes_margin_gate is False:
+        rejection_subtype = "margin_insufficient"
+    else:
+        rejection_subtype = "ensemble_execute_false"
+
+    return {
+        "score_minus_trade_threshold": round(float(score_minus_trade_threshold), 4),
+        "score_minus_model_threshold": round(float(score_minus_model_threshold), 4),
+        "required_margin": (
+            round(float(required_margin), 4) if required_margin is not None else None
+        ),
+        "passes_margin_gate": passes_margin_gate,
+        "rejection_subtype": rejection_subtype,
+    }
+
 
 def _apply_intraday_levels_entry_quality_gate(
     self,
@@ -145,6 +205,11 @@ def _apply_threshold_rejection_payload(
     result: Dict[str, Any],
 ) -> None:
     """Populate rejection payload when a candidate fails threshold/headwind gating."""
+    rejection_context = _extract_threshold_rejection_context(
+        decision=decision,
+        effective_trade_threshold=effective_trade_threshold,
+        passed_trade_threshold=passed_trade_threshold,
+    )
 
     result["signal_rejected"] = {
         "gate": "cross_asset_headwind"
@@ -171,5 +236,5 @@ def _apply_threshold_rejection_payload(
         "headwind_threshold_boost": round(float(headwind_boost), 4),
         "cross_asset_headwind": headwind_metrics,
         "timestamp": timestamp.isoformat(),
+        **rejection_context,
     }
-

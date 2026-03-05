@@ -176,11 +176,13 @@ class DayTradingManager:
         fixed_stop_loss_pct: float = 0.0,
         portfolio_drawdown_halt_pct: float = 5.0,
         headwind_activation_score: float = 0.5,
+        flat_roundtrip_cost: Optional[float] = 0.5,
     ):
+        _flat_cost = flat_roundtrip_cost
         apply_core_runtime_defaults(
             manager=self,
             init_values=locals(),
-            trading_costs_factory=TradingCosts,
+            trading_costs_factory=lambda: TradingCosts(flat_roundtrip_cost=_flat_cost),
             intraday_memory_factory=IntradayMemoryService,
         )
         wire_manager_services(

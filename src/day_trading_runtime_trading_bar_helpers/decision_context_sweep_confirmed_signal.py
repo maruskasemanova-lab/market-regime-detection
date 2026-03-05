@@ -198,13 +198,16 @@ def _handle_confirmed_liquidity_sweep_signal(
     risk_pct = abs(float(sweep_signal.stop_loss) - float(sweep_signal.price)) / max(
         float(sweep_signal.price), 1e-9
     ) * 100.0
-    if risk_pct < 0.10:
+    min_risk_pct = float(
+        getattr(getattr(session, "config", None), "cost_aware_sweep_min_risk_pct", 0.10) or 0.10
+    )
+    if risk_pct < min_risk_pct:
         result["action"] = "liquidity_sweep_filtered"
         result["reason"] = "cost_aware_sweep_risk_too_small"
         result["signal_rejected"] = {
             "gate": "cost_aware_sweep",
             "risk_pct": round(risk_pct, 4),
-            "min_required": 0.10,
+            "min_required": min_risk_pct,
             "timestamp": timestamp.isoformat(),
         }
         confirmation_payload["signal_queued"] = False

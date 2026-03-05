@@ -273,6 +273,34 @@ def _process_session_bar_payload(source: Any) -> Dict[str, Any]:
     return result
 
 
+def _strategy_to_payload(strategy: Any, include_formula_docs: bool = False) -> Dict[str, Any]:
+    """Serialize strategy objects while staying compatible with legacy to_dict signatures."""
+    try:
+        return strategy.to_dict(include_formula_docs=include_formula_docs)
+    except TypeError:
+        payload = strategy.to_dict()
+        if not isinstance(payload, dict):
+            return payload
+        if include_formula_docs:
+            payload.setdefault(
+                "custom_formula_supported_variables",
+                list(getattr(strategy, "custom_formula_supported_variables", [])),
+            )
+            payload.setdefault(
+                "custom_formula_variable_docs",
+                dict(getattr(strategy, "custom_formula_variable_docs", {})),
+            )
+            payload.setdefault(
+                "custom_formula_examples",
+                dict(getattr(strategy, "custom_formula_examples", {})),
+            )
+        else:
+            payload.pop("custom_formula_supported_variables", None)
+            payload.pop("custom_formula_variable_docs", None)
+            payload.pop("custom_formula_examples", None)
+        return payload
+
+
 # ============ API Endpoints ============
 
 @app.get("/")
@@ -281,33 +309,30 @@ async def root():
 
 
 @app.get("/api/state")
-async def get_state():
+async def get_state(include_formula_docs: bool = False):
     """Get current engine state including regime, strategies, positions."""
-    return engine.get_state()
+    return engine.get_state(include_formula_docs=include_formula_docs)
 
 
 @app.get("/api/regime")
-async def get_regime():
+async def get_regime(force_refresh: bool = False):
     """Get current market regime."""
-    # Fetch fresh data to detect regime
-    ohlcv = engine.fetch_history(100)
-    indicators = engine.fetch_all_indicators()
-    
-    if ohlcv and 'close' in ohlcv:
-        regime = engine.detect_regime(ohlcv, indicators)
-        engine.current_regime = regime
-        
-        return {
-            "regime": regime.value,
-            "description": get_regime_description(regime.value),
-            "active_strategies": [s.name for s in engine.get_active_strategies(regime)]
-        }
-    
-    return {"regime": "MIXED", "error": "Could not fetch data"}
+    if force_refresh:
+        ohlcv = engine.fetch_history(100)
+        indicators = engine.fetch_all_indicators()
+        if ohlcv and 'close' in ohlcv:
+            engine.current_regime = engine.detect_regime(ohlcv, indicators)
+
+    regime = engine.current_regime
+    return {
+        "regime": regime.value,
+        "description": get_regime_description(regime.value),
+        "active_strategies": [s.name for s in engine.get_active_strategies(regime)]
+    }
 
 
 @app.get("/api/strategies")
-async def get_strategies():
+async def get_strategies(include_formula_docs: bool = False):
     """Get all strategies with their configuration."""
     # Normalize allowed_regimes to Regime enums to avoid serialization errors
     for strat in engine.strategies.values():
@@ -317,7 +342,10 @@ async def get_strategies():
         if hasattr(strat, "allowed_regimes"):
             strat.allowed_regimes = coerce_regimes(getattr(strat, "allowed_regimes"))
     return {
-        name: strategy.to_dict() 
+        name: _strategy_to_payload(
+            strategy,
+            include_formula_docs=include_formula_docs,
+        )
         for name, strategy in engine.strategies.items()
     }
 
@@ -949,7 +977,7 @@ async def update_orchestrator_config(body: Dict[str, Any]):
     orch = day_trading_manager.orchestrator
     if not orch:
         raise HTTPException(400, "Orchestrator not initialized")
-    updated = apply_orchestrator_config_updates(orch=orch, body=body)
+    updated = apply_orchestrator_config_updates(orch=orch, body=body, manager=day_trading_manager)
     return {"message": "Orchestrator config updated", "updated": updated}
 
 

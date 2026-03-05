@@ -117,6 +117,16 @@ def apply_session_config_resolution(
     manager.max_fill_participation_rate = canonical.max_fill_participation_rate
     manager.min_fill_ratio = canonical.min_fill_ratio
 
+    # ── Flat roundtrip cost override ───────────────────────────────────
+    # When set in the session config, bypass all dynamic slippage/commission
+    # models and use a single fixed dollar amount per roundtrip.
+    _flat_cost = config_payload.get("flat_roundtrip_cost")
+    if _flat_cost is not None and hasattr(manager, "trading_costs"):
+        try:
+            manager.trading_costs.flat_roundtrip_cost = float(_flat_cost)
+        except (TypeError, ValueError):
+            pass
+
     manager.set_run_defaults(
         run_id=run_id,
         ticker=ticker,

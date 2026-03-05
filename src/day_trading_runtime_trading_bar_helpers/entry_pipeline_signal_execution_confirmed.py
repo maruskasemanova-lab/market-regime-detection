@@ -54,6 +54,9 @@ def _apply_pullback_quality_gate(
     timestamp: datetime,
     result: Dict[str, Any],
 ) -> bool:
+    config = getattr(session, "config", None)
+    if not bool(getattr(config, "pullback_quality_gate_enabled", True)):
+        return False
     strategy_key = self._canonical_strategy_key(signal.strategy_name or "")
     if strategy_key != "pullback":
         return False
@@ -178,6 +181,40 @@ def _execute_confirmed_decision_signal(
     """Run confirmation gates and queueing for an executable threshold-passing decision."""
 
     signal = decision.signal
+    config = getattr(session, "config", None)
+    bypass_all = bool(getattr(config, "bypass_all_entry_gates", False))
+
+    if bypass_all:
+        # Master bypass: skip all post-scoring gates, go straight to queueing
+        _enrich_signal_metadata_for_entry_pipeline(
+            session=session,
+            signal=signal,
+            flow_metrics=flow_metrics,
+            l2_metrics={},
+            momentum_flow_metrics={},
+            momentum_diversification_metrics={},
+            regime=regime,
+            result=result,
+        )
+        _publish_signal_candidate_payload(
+            self,
+            session=session,
+            signal=signal,
+            result=result,
+        )
+        if signal.signal_type in [SignalType.BUY, SignalType.SELL]:
+            if _queue_signal_for_next_bar_with_cost_gate(
+                session=session,
+                signal=signal,
+                decision=decision,
+                effective_trade_threshold=effective_trade_threshold,
+                current_bar_index=current_bar_index,
+                timestamp=timestamp,
+                result=result,
+            ):
+                return True
+        return False
+
     l2_blocked, l2_metrics = _apply_l2_confirmation_gate(
         self,
         session=session,

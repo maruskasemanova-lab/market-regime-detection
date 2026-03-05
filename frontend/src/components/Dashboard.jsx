@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import useBackendApi from '../hooks/useBackendApi';
 import RegimeIndicator from './RegimeIndicator';
 import StrategyCard from './StrategyCard';
@@ -39,38 +39,69 @@ function Dashboard() {
   const [stepResult, setStepResult] = useState(null);
   const [tradingConfig, setTradingConfig] = useState(null);
   const [showConfig, setShowConfig] = useState(false);
+  const refreshInFlightRef = useRef(false);
 
-  // Fetch all data
-  const refreshData = async () => {
-    const [regimeData, signalsData, tradesData, positionsData, perfData, currentData, configData] = 
-      await Promise.all([
-        fetchRegime(),
-        fetchSignals(),
-        fetchTrades(),
-        fetchPositions(),
-        fetchPerformance(),
-        fetchCurrent(),
-        fetchTradingConfig(),
-      ]);
-    
-    if (regimeData) setRegime(regimeData);
-    if (signalsData) setSignals(signalsData.signals || []);
-    if (tradesData) setTrades(tradesData.trades || []);
-    if (positionsData) setPositions(positionsData.open_positions || {});
-    if (perfData) setPerformance(perfData);
-    if (currentData) setCurrentPrice(currentData);
-    if (configData) setTradingConfig(configData);
-  };
+  const refreshData = useCallback(async ({ includeConfig = false } = {}) => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    try {
+      const [regimeData, signalsData, tradesData, positionsData, perfData, currentData, configData] =
+        await Promise.all([
+          fetchRegime(),
+          fetchSignals(),
+          fetchTrades(),
+          fetchPositions(),
+          fetchPerformance(),
+          fetchCurrent(),
+          includeConfig ? fetchTradingConfig() : Promise.resolve(null),
+        ]);
+
+      if (regimeData) setRegime(regimeData);
+      if (signalsData) setSignals(signalsData.signals || []);
+      if (tradesData) setTrades(tradesData.trades || []);
+      if (positionsData) setPositions(positionsData.open_positions || {});
+      if (perfData) setPerformance(perfData);
+      if (currentData) setCurrentPrice(currentData);
+      if (configData) setTradingConfig(configData);
+    } finally {
+      refreshInFlightRef.current = false;
+    }
+  }, [
+    fetchRegime,
+    fetchSignals,
+    fetchTrades,
+    fetchPositions,
+    fetchPerformance,
+    fetchCurrent,
+    fetchTradingConfig,
+  ]);
 
   useEffect(() => {
-    refreshData();
+    refreshData({ includeConfig: true });
     // Refresh every 5 seconds
-    const interval = setInterval(refreshData, 5000);
+    const interval = setInterval(() => {
+      refreshData();
+    }, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [refreshData]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!showConfig || tradingConfig) return () => {
+      cancelled = true;
+    };
+    fetchTradingConfig().then((configData) => {
+      if (!cancelled && configData) {
+        setTradingConfig(configData);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [showConfig, tradingConfig, fetchTradingConfig]);
 
   const handleStep = async () => {
-    const result = await stepBacktest();
+    const result = await stepBacktest({ refreshState: false });
     if (result) {
       setStepResult(result);
       await refreshData();
@@ -79,21 +110,27 @@ function Dashboard() {
 
   const handleRun = async (bars) => {
     setIsRunning(true);
-    for (let i = 0; i < bars; i++) {
-      const result = await stepBacktest();
-      if (result) {
-        setStepResult(result);
-        await refreshData();
-      }
-      await new Promise(r => setTimeout(r, 200)); // Small delay for visualization
+    try {
+      const result = await runBacktest(bars, { refreshState: false });
+      const results = Array.isArray(result?.results) ? result.results : [];
+      const latest = results[results.length - 1];
+      if (latest) setStepResult(latest);
+      await Promise.all([
+        fetchState(),
+        refreshData(),
+      ]);
+    } finally {
+      setIsRunning(false);
     }
-    setIsRunning(false);
   };
 
   const handleReset = async () => {
-    await resetEngine();
+    await resetEngine({ refreshState: false });
     setStepResult(null);
-    await refreshData();
+    await Promise.all([
+      fetchState(),
+      refreshData({ includeConfig: showConfig }),
+    ]);
   };
 
   const handleToggleStrategy = async (name, enabled) => {

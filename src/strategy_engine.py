@@ -5,6 +5,7 @@ import requests
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from dataclasses import dataclass
+import inspect
 
 from .strategies.base_strategy import BaseStrategy, Signal, SignalType, Position, Regime
 from .strategies.trailing_stop import TrailingStopManager, TrailingStopConfig, StopType
@@ -363,11 +364,17 @@ class StrategyEngine:
             'open_positions': {k: v.to_dict() for k, v in self.open_positions.items()}
         }
     
-    def get_state(self) -> Dict[str, Any]:
+    def get_state(self, include_formula_docs: bool = False) -> Dict[str, Any]:
         """Get current engine state."""
         return {
             'regime': self.current_regime.value,
-            'strategies': {name: s.to_dict() for name, s in self.strategies.items()},
+            'strategies': {
+                name: self._serialize_strategy(
+                    s,
+                    include_formula_docs=include_formula_docs,
+                )
+                for name, s in self.strategies.items()
+            },
             'active_strategies': [s.name for s in self.get_active_strategies(self.current_regime)],
             'open_positions': {k: v.to_dict() for k, v in self.open_positions.items()},
             'total_signals': len(self.all_signals),
@@ -423,3 +430,37 @@ class StrategyEngine:
             'worst_trade': round(min(t.pnl_pct for t in self.all_trades), 2),
             'by_strategy': by_strategy
         }
+    @staticmethod
+    def _serialize_strategy(strategy: BaseStrategy, include_formula_docs: bool = False) -> Dict[str, Any]:
+        """Serialize strategy while remaining compatible with subclass to_dict signatures."""
+        try:
+            params = inspect.signature(strategy.to_dict).parameters
+        except (TypeError, ValueError):
+            params = {}
+
+        if "include_formula_docs" in params:
+            return strategy.to_dict(include_formula_docs=include_formula_docs)
+
+        payload = strategy.to_dict()
+        if not isinstance(payload, dict):
+            return payload
+
+        if include_formula_docs:
+            payload.setdefault(
+                "custom_formula_supported_variables",
+                list(getattr(strategy, "custom_formula_supported_variables", [])),
+            )
+            payload.setdefault(
+                "custom_formula_variable_docs",
+                dict(getattr(strategy, "custom_formula_variable_docs", {})),
+            )
+            payload.setdefault(
+                "custom_formula_examples",
+                dict(getattr(strategy, "custom_formula_examples", {})),
+            )
+        else:
+            payload.pop("custom_formula_supported_variables", None)
+            payload.pop("custom_formula_variable_docs", None)
+            payload.pop("custom_formula_examples", None)
+
+        return payload

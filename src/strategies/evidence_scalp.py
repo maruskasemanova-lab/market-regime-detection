@@ -159,16 +159,44 @@ class EvidenceScalpStrategy(BaseStrategy):
         eff_stop = self.get_effective_min_stop_loss_pct() or self.base_stop_loss_pct
         eff_rr = self.get_effective_rr_ratio() or self.target_rr_ratio
         
-        stop_distance = current_price * (eff_stop / 100.0)
-
         if direction == "bullish":
             signal_type = SignalType.BUY
-            stop_loss = current_price - stop_distance
-            take_profit = self.calculate_take_profit(current_price, stop_loss, eff_rr, side="long")
+            side = "long"
         else:
             signal_type = SignalType.SELL
-            stop_loss = current_price + stop_distance
-            take_profit = self.calculate_take_profit(current_price, stop_loss, eff_rr, side="short")
+            side = "short"
+
+        targets = self.resolve_structural_targets(
+            current_price=current_price,
+            side=side,
+            indicators=indicators,
+            fallback_atr_multiplier=1.0,  # Scalp relies on standard tight % stops if no structural exits exist
+            fallback_rr_ratio=eff_rr,
+        )
+
+        stop_loss = targets["stop_loss"]
+        take_profit = targets["take_profit"]
+
+        # For Micro-Scalping, if the structural stop is TOO far away (> base_stop_loss_pct),
+        # we enforce the tight base_stop_loss_pct to prevent massive losses.
+        if side == "long":
+            max_sl_distance = current_price * (eff_stop / 100.0)
+            if current_price - stop_loss > max_sl_distance:
+                stop_loss = current_price - max_sl_distance
+                targets["sl_reason"] = f"scalp_max_risk_cap_{eff_stop:.2f}%"
+                targets["stop_type"] = "standard_math"
+                # Adjust TP mathematically if SL was tightened
+                take_profit = self.calculate_take_profit(current_price, stop_loss, eff_rr, side="long")
+                targets["tp_reason"] = "rr_adjusted_for_cap"
+        else:
+            max_sl_distance = current_price * (eff_stop / 100.0)
+            if stop_loss - current_price > max_sl_distance:
+                stop_loss = current_price + max_sl_distance
+                targets["sl_reason"] = f"scalp_max_risk_cap_{eff_stop:.2f}%"
+                targets["stop_type"] = "standard_math"
+                # Adjust TP mathematically if SL was tightened
+                take_profit = self.calculate_take_profit(current_price, stop_loss, eff_rr, side="short")
+                targets["tp_reason"] = "rr_adjusted_for_cap"
 
         # ── Scalping Cost Guard ──
         reward_bps = abs(take_profit - current_price) / max(current_price, 1e-6) * 10000.0
@@ -196,7 +224,10 @@ class EvidenceScalpStrategy(BaseStrategy):
                     "reward_bps": round(reward_bps, 1),
                     "estimated_cost_bps": round(est_cost_bps, 1),
                 },
-                "scalp_trigger": reason
+                "scalp_trigger": reason,
+                "tp_reason": targets["tp_reason"],
+                "sl_reason": targets["sl_reason"],
+                "stop_type": targets["stop_type"],
             },
         )
 

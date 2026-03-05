@@ -349,6 +349,134 @@ class BaseStrategy(ABC):
             return entry + (risk * rr_ratio)
         return entry - (risk * rr_ratio)
 
+    def resolve_structural_targets(
+        self,
+        current_price: float,
+        side: str,
+        indicators: Dict[str, Any],
+        fallback_atr_multiplier: float = 2.0,
+        fallback_rr_ratio: float = 2.0,
+    ) -> Dict[str, Any]:
+        """
+        Dynamically locate the nearest structural levels from `intraday_levels` to build
+        TP and SL barriers, instead of using arbitrary math.
+        
+        If structural levels do not exist (e.g., early open), fall back to ATR/RR projections.
+        """
+        is_long = str(side or "").strip().lower() == "long"
+
+        il = indicators.get("intraday_levels")
+        if not isinstance(il, dict):
+            il = {}
+        levels = il.get("levels")
+        if not isinstance(levels, list):
+            levels = []
+        profile = il.get("volume_profile")
+        if not isinstance(profile, dict):
+            profile = {}
+        poc_price = float(profile.get("poc_price") or 0.0)
+
+        # Determine ATR context for buffer framing and fallback
+        atr_series = indicators.get("atr") or []
+        atr_val = float(atr_series[-1]) if atr_series else max(current_price * 0.004, 0.01)
+        fallback_stop = self.calculate_atr_stop(current_price, atr_val, fallback_atr_multiplier, side)
+        fallback_tp = self.calculate_take_profit(current_price, fallback_stop, fallback_rr_ratio, side)
+
+        # Track nearest valid target/stop in a single pass to reduce allocations.
+        nearest_target_px: Optional[float] = None
+        nearest_target_reason = ""
+        nearest_stop_px: Optional[float] = None
+        nearest_stop_reason = ""
+
+        # Always consider POC as a target if it's on the correct side.
+        if poc_price > 0.0:
+            if is_long and poc_price > current_price:
+                nearest_target_px = poc_price
+                nearest_target_reason = "poc"
+            elif not is_long and poc_price < current_price:
+                nearest_target_px = poc_price
+                nearest_target_reason = "poc"
+
+        for lvl in levels:
+            if lvl.get("broken", False):
+                continue
+
+            try:
+                p = float(lvl.get("price", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if p <= 0:
+                continue
+
+            try:
+                tests = int(lvl.get("tests", 0) or 0)
+            except (TypeError, ValueError):
+                tests = 0
+            kind = str(lvl.get("kind", "")).lower()
+            source = str(lvl.get("source", "")).lower()
+
+            # Need at least 1 test or be a prior-day anchor to rely on it structurally
+            if tests < 1 and not source.startswith("prior_day"):
+                continue
+
+            # Route to stops or targets based on level location relative to trade entry
+            if is_long:
+                if p < current_price and kind == "support":
+                    if nearest_stop_px is None or p > nearest_stop_px:
+                        nearest_stop_px = p
+                        nearest_stop_reason = f"support_level_{tests}t"
+                elif p > current_price and kind == "resistance":
+                    if nearest_target_px is None or p < nearest_target_px:
+                        nearest_target_px = p
+                        nearest_target_reason = f"resistance_level_{tests}t"
+            else:
+                if p > current_price and kind == "resistance":
+                    if nearest_stop_px is None or p < nearest_stop_px:
+                        nearest_stop_px = p
+                        nearest_stop_reason = f"resistance_level_{tests}t"
+                elif p < current_price and kind == "support":
+                    if nearest_target_px is None or p > nearest_target_px:
+                        nearest_target_px = p
+                        nearest_target_reason = f"support_level_{tests}t"
+
+        # Apply standard buffers to structural bounds
+        buffer_abs = max(1e-4, atr_val * 0.20)
+
+        result = {
+            "stop_loss": fallback_stop,
+            "take_profit": fallback_tp,
+            "sl_reason": "atr_fallback",
+            "tp_reason": "rr_fallback",
+            "stop_type": "standard_math"
+        }
+
+        # Select the nearest structure to hide the Stop Loss behind
+        if nearest_stop_px is not None:
+            if is_long:
+                stop_reason = nearest_stop_reason or "support_level"
+                sl_val = nearest_stop_px - buffer_abs
+            else:
+                stop_reason = nearest_stop_reason or "resistance_level"
+                sl_val = nearest_stop_px + buffer_abs
+            
+            result["stop_loss"] = round(sl_val, 4)
+            result["sl_reason"] = stop_reason
+            result["stop_type"] = "hybrid_price_space"
+            
+        # Select the nearest structure to place the Take Profit in front of
+        if nearest_target_px is not None:
+            if is_long:
+                tp_reason = nearest_target_reason or "resistance_level"
+                tp_val = nearest_target_px - buffer_abs
+            else:
+                tp_reason = nearest_target_reason or "support_level"
+                tp_val = nearest_target_px + buffer_abs
+
+            result["take_profit"] = round(tp_val, 4)
+            result["tp_reason"] = tp_reason
+            
+        return result
+
     def normalize_source_mode(self, value: Any) -> str:
         """Normalize source mode to one of the supported values."""
         normalized = str(value or "").strip().lower()
@@ -496,7 +624,7 @@ class BaseStrategy(ABC):
         """Get all open positions."""
         return [p for p in self.positions if p.status == 'open']
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, include_formula_docs: bool = False) -> Dict[str, Any]:
         """Serialize strategy state."""
         payload = {
             'name': self.name,
@@ -558,13 +686,14 @@ class BaseStrategy(ABC):
         payload["custom_exit_formula"] = str(
             getattr(self, "custom_exit_formula", "") or ""
         )
-        payload["custom_formula_supported_variables"] = list(
-            getattr(self, "custom_formula_supported_variables", [])
-        )
-        payload["custom_formula_variable_docs"] = dict(
-            getattr(self, "custom_formula_variable_docs", {})
-        )
-        payload["custom_formula_examples"] = dict(
-            getattr(self, "custom_formula_examples", {})
-        )
+        if include_formula_docs:
+            payload["custom_formula_supported_variables"] = list(
+                getattr(self, "custom_formula_supported_variables", [])
+            )
+            payload["custom_formula_variable_docs"] = dict(
+                getattr(self, "custom_formula_variable_docs", {})
+            )
+            payload["custom_formula_examples"] = dict(
+                getattr(self, "custom_formula_examples", {})
+            )
         return payload

@@ -178,6 +178,7 @@ class TradingConfig:
     sweep_min_book_pressure_z: float = 1.5
     sweep_max_price_change_pct: float = 0.05
     sweep_atr_buffer_multiplier: float = 0.5
+    cost_aware_sweep_min_risk_pct: float = 0.10
     context_aware_risk_enabled: bool = False
     context_risk_sl_buffer_pct: float = 0.03
     context_risk_min_sl_pct: float = 0.30
@@ -192,6 +193,7 @@ class TradingConfig:
     pullback_context_min_sl_pct: float = 0.50
     pullback_time_exit_bars: int = 7
     pullback_morning_window_enabled: bool = True
+    pullback_quality_gate_enabled: bool = True
     pullback_entry_start_time: str = "10:00"
     pullback_entry_end_time: str = "11:30"
     pullback_require_poc_on_trade_side: bool = True
@@ -208,6 +210,8 @@ class TradingConfig:
     strategy_selection_mode: str = "adaptive_top_n"
     max_active_strategies: int = 3
     momentum_diversification: Dict[str, Any] = field(default_factory=dict)
+    momentum_diversification_gate_enabled: bool = True
+    bypass_all_entry_gates: bool = False
     regime_filter: Optional[Tuple[str, ...]] = None
     # -- Entry filter relaxation --
     micro_confirmation_mode: str = "consecutive_close"  # "consecutive_close" | "volume_delta" | "disabled"

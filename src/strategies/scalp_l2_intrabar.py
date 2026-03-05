@@ -364,18 +364,42 @@ class ScalpL2IntrabarStrategy(BaseStrategy):
 
         if long_trigger:
             signal_type = SignalType.BUY
-            stop_loss = current_price - stop_distance
-            take_profit = self.calculate_take_profit(
-                current_price, stop_loss, effective_rr_ratio, side="long"
-            )
+            side = "long"
             direction_label = "long_scalp"
         else:
             signal_type = SignalType.SELL
-            stop_loss = current_price + stop_distance
-            take_profit = self.calculate_take_profit(
-                current_price, stop_loss, effective_rr_ratio, side="short"
-            )
+            side = "short"
             direction_label = "short_scalp"
+
+        # Structural Targets for Scalping
+        # We will use the standard structure, but if it relies on ATR fallback,
+        # we will override it with the tight scalping stop distance logic inside this class.
+        targets = self.resolve_structural_targets(
+            current_price=current_price,
+            side=side,
+            indicators=indicators,
+            fallback_atr_multiplier=effective_atr_stop_multiplier,
+            fallback_rr_ratio=effective_rr_ratio,
+        )
+
+        stop_loss = targets["stop_loss"]
+        take_profit = targets["take_profit"]
+
+        # If it fell back or if the structure is too wide for a scalp, clamp the max risk
+        if side == "long":
+            if current_price - stop_loss > stop_distance:
+                stop_loss = current_price - stop_distance
+                targets["sl_reason"] = f"scalp_max_risk_cap_{stop_distance:.4f}"
+                targets["stop_type"] = "standard_math"
+                take_profit = self.calculate_take_profit(current_price, stop_loss, effective_rr_ratio, side="long")
+                targets["tp_reason"] = "rr_adjusted_for_cap"
+        else:
+            if stop_loss - current_price > stop_distance:
+                stop_loss = current_price + stop_distance
+                targets["sl_reason"] = f"scalp_max_risk_cap_{stop_distance:.4f}"
+                targets["stop_type"] = "standard_math"
+                take_profit = self.calculate_take_profit(current_price, stop_loss, effective_rr_ratio, side="short")
+                targets["tp_reason"] = "rr_adjusted_for_cap"
 
         expected_reward_bps = abs(take_profit - current_price) / max(current_price, 1e-6) * 10000.0
         expected_risk_bps = abs(current_price - stop_loss) / max(current_price, 1e-6) * 10000.0
@@ -445,6 +469,9 @@ class ScalpL2IntrabarStrategy(BaseStrategy):
                     "spread_cost_multiplier": self.spread_cost_multiplier,
                     "min_reward_to_cost_ratio": self.min_reward_to_cost_ratio,
                 },
+                "tp_reason": targets["tp_reason"],
+                "sl_reason": targets["sl_reason"],
+                "stop_type": targets["stop_type"],
             },
         )
         self.add_signal(signal)

@@ -114,18 +114,24 @@ class MomentumFlowStrategy(BaseStrategy):
 
         if long_trigger:
             signal_type = SignalType.BUY
-            stop_loss = current_price - (atr_val * effective_atr_stop_multiplier)
-            take_profit = self.calculate_take_profit(
-                current_price, stop_loss, effective_rr_ratio, side="long"
-            )
+            side = "long"
             direction_label = "up"
         else:
             signal_type = SignalType.SELL
-            stop_loss = current_price + (atr_val * effective_atr_stop_multiplier)
-            take_profit = self.calculate_take_profit(
-                current_price, stop_loss, effective_rr_ratio, side="short"
-            )
+            side = "short"
             direction_label = "down"
+
+        # Structural Targets
+        targets = self.resolve_structural_targets(
+            current_price=current_price,
+            side=side,
+            indicators=indicators,
+            fallback_atr_multiplier=effective_atr_stop_multiplier,
+            fallback_rr_ratio=effective_rr_ratio,
+        )
+
+        stop_loss = targets["stop_loss"]
+        take_profit = targets["take_profit"]
 
         signal = Signal(
             strategy_name=self.name,
@@ -152,7 +158,10 @@ class MomentumFlowStrategy(BaseStrategy):
                     "book_pressure_trend": book_pressure_trend,
                     "price_change_pct": price_change_pct,
                     "delta_acceleration": delta_acceleration,
-                }
+                },
+                "tp_reason": targets["tp_reason"],
+                "sl_reason": targets["sl_reason"],
+                "stop_type": targets["stop_type"],
             },
         )
         self.add_signal(signal)
